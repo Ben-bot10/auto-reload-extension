@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+<title>Refresh Radar</title>
+</head>
+<body>
+
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-radar" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round">
+    <path d="M20.5 12a8.5 8.5 0 1 1-3-6.5"/><path d="M21 3v5h-5"/><circle cx="12" cy="12" r="2.5"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 5v14M15 5v14"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a1.7 1.7 0 0 0-1.6-1H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 3 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 3.4V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 9h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+  <symbol id="i-form" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10h6M7 14h4"/></symbol>
+  <symbol id="i-hash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M10 3 8 21M16 3l-2 18M3.5 8.5h17M3 15.5h17"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 3l18 18"/><path d="M10.6 5.2A9.9 9.9 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.3 4.2M6.3 6.4A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 4.1-.9"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h11l-3-3M20 17H9l3 3"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-timer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 2h6M12 8v5l3 2"/><circle cx="12" cy="13" r="8"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="m4 3 7 17 2.5-6.5L20 11z"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M18 8a6 6 0 1 0-12 0c0 6-3 7-3 7h18s-3-1-3-7"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19.5 5.5a9 9 0 0 1 0 13"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 1 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 1 0 7 7l1.5-1.5"/></symbol>
+  <symbol id="i-scroll" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4"/></symbol>
+  <symbol id="i-tabs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-dice" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.3" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--card)"/><circle cx="15" cy="12" r="2" fill="var(--card)"/><circle cx="7" cy="18" r="2" fill="var(--card)"/></symbol>
+  <symbol id="i-flash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
+  <symbol id="i-window" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></symbol>
+</svg>
+
+<header>
+  <div class="logo"><svg><use href="#i-radar"/></svg></div>
+  <div class="ttl">
+    <h1>Refresh Radar <span class="ver">v3.0</span></h1>
+    <p id="status">Idle</p>
+  </div>
+  <button id="pause" class="icon-btn hidden" title="Pause / resume"><svg><use href="#i-pause"/></svg></button>
+  <button id="openOptions" class="icon-btn" title="Settings"><svg><use href="#i-gear"/></svg></button>
+  <button id="toggle" class="btn-primary"><svg><use href="#i-play"/></svg><span>Start</span></button>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="interval">Interval</button>
+  <button class="tab" data-tab="timer">Timer</button>
+  <button class="tab" data-tab="tabs">Tabs</button>
+  <button class="tab" data-tab="monitor">Monitor</button>
+</nav>
+
+<main>
+
+<!-- ============================================================ INTERVAL -->
+<section class="pane active" id="pane-interval">
+
+  <div class="seg" id="modeSeg">
+    <button data-v="fixed" class="on"><svg><use href="#i-clock"/></svg>Fixed</button>
+    <button data-v="random"><svg><use href="#i-dice"/></svg>Random</button>
+    <button data-v="custom"><svg><use href="#i-sliders"/></svg>Custom</button>
+  </div>
+
+  <div id="fixedWrap">
+    <div class="stepper">
+      <div class="cap"><span>Interval</span><span>seconds</span></div>
+      <div class="val">
+        <button id="minus">−</button>
+        <input type="number" id="is" min="1" value="30">
+        <button id="plus">+</button>
+      </div>
+    </div>
+    <div class="chips" id="presets">
+      <button data-s="2">2s</button><button data-s="5">5s</button><button data-s="10">10s</button>
+      <button data-s="15">15s</button><button data-s="30">30s</button><button data-s="60">1m</button>
+      <button data-s="300">5m</button><button data-s="900">15m</button>
+    </div>
+  </div>
+
+  <div id="randomWrap" class="hidden">
+    <div class="two">
+      <label class="fld"><span>Minimum</span><input type="number" id="intervalMin" min="1" value="20"></label>
+      <label class="fld"><span>Maximum</span><input type="number" id="intervalMax" min="1" value="60"></label>
+    </div>
+    <p class="kbd">A different wait every cycle, so the pattern doesn't look robotic.</p>
+  </div>
+
+  <div id="customWrap" class="hidden">
+    <div class="two">
+      <label class="fld"><span>Hours</span><input type="number" id="ih" min="0" value="0"></label>
+      <label class="fld"><span>Minutes</span><input type="number" id="im" min="0" value="0"></label>
+      <label class="fld"><span>Seconds</span><input type="number" id="ics" min="0" value="30"></label>
+    </div>
+  </div>
+
+  <div class="sec" id="sec-opts">
+    <button class="sec-h" data-sec="sec-opts">Options<svg class="chev"><use href="#i-chev"/></svg></button>
+    <div class="sec-body">
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-bolt"/></svg></span>
+        <div class="body"><b>Hard refresh</b><span>Bypass the cache on every reload</span></div>
+        <label class="sw"><input type="checkbox" id="hardReload"><i></i></label>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-form"/></svg></span>
+        <div class="body"><b>Prevent form resubmission</b><span>Reload as a fresh visit on pages sent with a form</span></div>
+        <label class="sw"><input type="checkbox" id="noResubmit"><i></i></label>
+      </div>
+
+      <div class="card column">
+        <div class="top">
+          <span class="ic"><svg><use href="#i-hash"/></svg></span>
+          <div class="body"><b>Set refresh number</b><span>Stop after a fixed count</span></div>
+          <label class="sw"><input type="checkbox" id="maxOn"><i></i></label>
+        </div>
+        <div class="extra hidden" id="maxExtra">
+          <div class="inline"><span class="unit">Stop after</span><input type="number" id="maxRefreshes" min="1" value="10"><span class="unit">reloads</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-eye-off"/></svg></span>
+        <div class="body"><b>Only while backgrounded</b><span>Skip reloads when you're looking at the tab</span></div>
+        <label class="sw"><input type="checkbox" id="onlyWhenHidden"><i></i></label>
+      </div>
+
+      <div class="card column">
+        <div class="top">
+          <span class="ic"><svg><use href="#i-cursor"/></svg></span>
+          <div class="body"><b>Pause while I'm using the page</b><span>Typing or clicking holds the countdown</span></div>
+          <label class="sw"><input type="checkbox" id="pauseOnInteract"><i></i></label>
+        </div>
+        <div class="extra hidden" id="resumeExtra">
+          <div class="inline"><span class="unit">Resume after</span><input type="number" id="resumeAfter" min="1" value="15"><span class="unit">sec idle</span></div>
+        </div>
+      </div>
+
+      <div class="card column">
+        <div class="top">
+          <span class="ic"><svg><use href="#i-swap"/></svg></span>
+          <div class="body"><b>Retry failed loads</b><span>Reload again if the page errors out or drops</span></div>
+          <label class="sw"><input type="checkbox" id="retryOnError"><i></i></label>
+        </div>
+        <div class="extra hidden" id="errExtra">
+          <div class="inline"><span class="unit">Retry after</span><input type="number" id="errorRetryDelay" min="1" value="10"><span class="unit">sec</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-shield"/></svg></span>
+        <div class="body"><b>Pause on captcha</b><span>Stop and warn instead of hammering the site</span></div>
+        <label class="sw"><input type="checkbox" id="captchaPause"><i></i></label>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-power"/></svg></span>
+        <div class="body"><b>Keep the computer awake</b><span>Block sleep while a watch is running</span></div>
+        <label class="sw"><input type="checkbox" id="keepAwake"><i></i></label>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-link"/></svg></span>
+        <div class="body"><b>Stop if the tab navigates away</b><span>End the watch when the URL changes</span></div>
+        <label class="sw"><input type="checkbox" id="stopIfUrlChanges"><i></i></label>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-scroll"/></svg></span>
+        <div class="body"><b>Auto scroll restoration</b><span>Return to your scroll position after each refresh</span></div>
+        <label class="sw"><input type="checkbox" id="preserveScroll"><i></i></label>
+      </div>
+
+      <div class="card">
+        <span class="ic"><svg><use href="#i-form"/></svg></span>
+        <div class="body"><b>Restore form fields</b><span>Re-fill inputs after reload (skips passwords)</span></div>
+        <label class="sw"><input type="checkbox" id="preserveForms"><i></i></label>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================== TIMER -->
+<section class="pane" id="pane-timer">
+
+  <div class="card">
+    <span class="ic"><svg><use href="#i-timer"/></svg></span>
+    <div class="body"><b>Visual timer on the page</b><span>A live countdown drawn over the site</span></div>
+    <label class="sw"><input type="checkbox" id="visualTimer"><i></i></label>
+  </div>
+
+  <div id="timerStyleWrap" class="hidden">
+    <div class="two">
+      <label class="fld"><span>Timer style</span>
+        <select id="timerStyle">
+          <option value="compact">Compact monitor</option>
+          <option value="ring">Progress ring</option>
+          <option value="dot">Minimal dot</option>
+          <option value="bar">Top progress bar</option>
+        </select>
+      </label>
+      <label class="fld"><span>Position</span>
+        <select id="timerCorner">
+          <option value="br">Bottom right</option><option value="bl">Bottom left</option>
+          <option value="tr">Top right</option><option value="tl">Top left</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
+    <span class="ic"><svg><use href="#i-swap"/></svg></span>
+    <div class="body"><b>Don't restart timer on page update<span class="pill">new</span></b><span>Keep counting when the page reloads or the URL changes</span></div>
+    <label class="sw"><input type="checkbox" id="continuousTimer"><i></i></label>
+  </div>
+
+  <div class="sec" id="sec-sched">
+    <button class="sec-h" data-sec="sec-sched">Countdown &amp; schedule<svg class="chev"><use href="#i-chev"/></svg></button>
+    <div class="sec-body">
+      <label class="fld"><span>First reload after <em class="hint">seconds, 0 = normal interval</em></span>
+        <input type="number" id="startDelay" min="0" value="0"></label>
+      <label class="fld"><span>Begin at <em class="hint">optional</em></span>
+        <input type="datetime-local" id="startAt"></label>
+      <label class="fld"><span>Stop at <em class="hint">optional</em></span>
+        <input type="datetime-local" id="stopAt"></label>
+    </div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+</section>
+
+<!-- ================================================================ TABS -->
+<section class="pane" id="pane-tabs">
+  <div class="count-h">Refreshing <span class="n" id="activeCount">0</span></div>
+  <div class="tablist" id="tablist"></div>
+
+  <label class="fld"><span>Watch a URL in a pinned background tab</span>
+    <div class="kw-add">
+      <input type="text" id="watchUrl" placeholder="example.com/page">
+      <button class="btn sm" id="watchGo">Open</button>
+    </div>
+  </label>
+
+  <div class="btnrow">
+    <button class="btn sm" id="applyAll">Apply to all tabs</button>
+    <button class="btn sm danger" id="stopAll">Stop all</button>
+  </div>
+
+  <p class="kbd">
+    <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> start/stop ·
+    <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> pause<br>
+    <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> pick element ·
+    <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> stop all
+  </p>
+</section>
+
+<!-- ============================================================= MONITOR -->
+<section class="pane" id="pane-monitor">
+
+  <div class="card">
+    <span class="ic"><svg><use href="#i-eye"/></svg></span>
+    <div class="body"><b>Page monitor</b><span>Alert me when the page meets a condition</span></div>
+    <label class="sw"><input type="checkbox" id="monitorEnabled"><i></i></label>
+  </div>
+
+  <div class="seg" id="modeWatch">
+    <button data-v="found" class="on"><svg><use href="#i-bell"/></svg>Found</button>
+    <button data-v="lost"><svg><use href="#i-eye-off"/></svg>Lost</button>
+    <button data-v="change"><svg><use href="#i-flash"/></svg>Change</button>
+  </div>
+
+  <div id="kwWrap">
+    <div class="kw-add">
+      <input type="text" id="kwInput" placeholder="Keyword, regex, XPath or CSS selector">
+      <select id="kwType">
+        <option value="auto">Auto</option><option value="text">Text</option>
+        <option value="regex">Regex</option><option value="css">CSS</option><option value="xpath">XPath</option>
+      </select>
+      <button class="btn sm solid" id="kwAdd">Add</button>
+    </div>
+
+    <div class="kw-list" id="kwList"></div>
+    <div class="empty-note hidden" id="kwEmpty">No keywords yet — add at least one to start monitoring.</div>
+
+    <div class="btnrow">
+      <button class="btn sm" id="kwDefaults">Defaults</button>
+      <button class="btn sm" id="kwImport">Import</button>
+      <button class="btn sm" id="kwExport">Export</button>
+      <button class="btn sm danger" id="kwClear">Clear</button>
+    </div>
+    <input type="file" id="kwFile" accept=".txt,.json,text/plain,application/json" class="hidden">
+
+    <div class="seg" id="logicSeg">
+      <button data-v="any">Match any</button>
+      <button data-v="all">Match all</button>
+    </div>
+
+    <div class="card">
+      <span class="ic"><svg><use href="#i-hash"/></svg></span>
+      <div class="body"><b>Case sensitive</b><span>Treat upper and lower case as different</span></div>
+      <label class="sw"><input type="checkbox" id="caseSensitive"><i></i></label>
+    </div>
+  </div>
+
+  <div class="sec closed" id="sec-area">
+    <button class="sec-h" data-sec="sec-area">Monitored area<svg class="chev"><use href="#i-chev"/></svg></button>
+    <div class="sec-body">
+      <label class="fld"><span>Limit the search to one region <em class="hint">blank = whole page</em></span>
+        <div class="kw-add">
+          <input type="text" id="selector" placeholder="#price, .status, //div[@id='x']">
+          <button class="btn sm" id="pick"><svg style="width:13px;height:13px;vertical-align:-2px"><use href="#i-target"/></svg> Pick</button>
+        </div>
+      </label>
+      <div class="two">
+        <label class="fld"><span>Selector type</span>
+          <select id="selectorType"><option value="css">CSS</option><option value="xpath">XPath</option></select></label>
+        <label class="fld"><span>Wait before scanning</span>
+          <input type="number" id="postLoadDelay" min="0" value="0"></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-code"/></svg></span>
+        <div class="body"><b>Search HTML source</b><span>Look inside the markup, not just visible text</span></div>
+        <label class="sw"><input type="checkbox" id="searchSource"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-flash"/></svg></span>
+        <div class="body"><b>Real-time detection</b><span>React to live DOM changes between reloads</span></div>
+        <label class="sw"><input type="checkbox" id="liveWatch"><i></i></label>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec closed" id="sec-act">
+    <button class="sec-h" data-sec="sec-act">On detection<svg class="chev"><use href="#i-chev"/></svg></button>
+    <div class="sec-body">
+      <div class="card">
+        <span class="ic"><svg><use href="#i-flash"/></svg></span>
+        <div class="body"><b>Highlight the keyword</b><span>Mark the matched text on the page</span></div>
+        <label class="sw"><input type="checkbox" id="highlight"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-scroll"/></svg></span>
+        <div class="body"><b>Scroll to keyword location</b><span>Jump the page to the match</span></div>
+        <label class="sw"><input type="checkbox" id="scrollToMatch"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-window"/></svg></span>
+        <div class="body"><b>Flash a banner</b><span>Full-width alert across the top of the page</span></div>
+        <label class="sw"><input type="checkbox" id="flashPage"><i></i></label>
+      </div>
+      <div class="card column">
+        <div class="top">
+          <span class="ic"><svg><use href="#i-cursor"/></svg></span>
+          <div class="body"><b>Auto-click on match</b><span>Click the match, or a target you name</span></div>
+          <label class="sw"><input type="checkbox" id="autoClick"><i></i></label>
+        </div>
+        <div class="extra hidden" id="clickExtra">
+          <label class="fld"><span>Click this instead <em class="hint">blank = the match</em></span>
+            <input type="text" id="autoClickTarget" placeholder="#buy-now, button.add-to-cart"></label>
+          <div class="inline" style="margin-bottom:9px"><span class="unit">Delay</span>
+            <input type="number" id="autoClickDelay" min="0" step="100" value="500"><span class="unit">ms</span></div>
+          <div class="card" style="margin:0">
+            <span class="ic"><svg><use href="#i-tabs"/></svg></span>
+            <div class="body"><b>Open in a new tab</b><span>For links, don't leave this page</span></div>
+            <label class="sw"><input type="checkbox" id="autoClickNewTab"><i></i></label>
+          </div>
+        </div>
+      </div>
+      <label class="fld"><span>Run JS on every load <em class="hint">optional</em></span>
+        <textarea id="scriptOnLoad" rows="2" placeholder="document.querySelector('.cookie-banner')?.remove()"></textarea></label>
+      <label class="fld"><span>Run JS on match <em class="hint">RR.excerpt holds the text</em></span>
+        <textarea id="scriptOnMatch" rows="2" placeholder="console.log('hit', RR.excerpt)"></textarea></label>
+    </div>
+  </div>
+
+  <div class="sec closed" id="sec-alert">
+    <button class="sec-h" data-sec="sec-alert">Alert settings<svg class="chev"><use href="#i-chev"/></svg></button>
+    <div class="sec-body">
+      <div class="card">
+        <span class="ic"><svg><use href="#i-bell"/></svg></span>
+        <div class="body"><b>Desktop notification</b><span>A system alert, even when Chrome is minimized</span></div>
+        <label class="sw"><input type="checkbox" id="notify"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-clock"/></svg></span>
+        <div class="body"><b>Keep it on screen</b><span>Stay until dismissed instead of fading</span></div>
+        <label class="sw"><input type="checkbox" id="sticky"><i></i></label>
+      </div>
+      <div class="card column">
+        <div class="top">
+          <span class="ic"><svg><use href="#i-volume"/></svg></span>
+          <div class="body"><b>Play a sound</b><span>Choose a tone or use your own file</span></div>
+          <label class="sw"><input type="checkbox" id="sound"><i></i></label>
+        </div>
+        <div class="extra" id="soundExtra">
+          <div class="two" style="margin-bottom:9px">
+            <select id="soundTone">
+              <option value="beep">Beep</option><option value="ding">Ding</option>
+              <option value="chime">Chime</option><option value="alarm">Alarm</option>
+              <option value="siren">Siren</option><option value="custom">My own file</option>
+            </select>
+            <button class="btn sm" id="testSound">Preview</button>
+          </div>
+          <div class="inline" style="margin-bottom:9px"><span class="unit">Repeat</span>
+            <input type="number" id="soundRepeat" min="1" max="20" value="3"><span class="unit">times</span></div>
+          <label class="fld" style="margin:0"><span>Volume</span>
+            <input type="range" id="volume" min="0" max="1" step="0.05" value="0.7"></label>
+        </div>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-window"/></svg></span>
+        <div class="body"><b>Focus the window</b><span>Bring this tab to the front on a match</span></div>
+        <label class="sw"><input type="checkbox" id="focusTab"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-swap"/></svg></span>
+        <div class="body"><b>Continue refreshing after a match</b><span>Keep going instead of stopping</span></div>
+        <label class="sw"><input type="checkbox" id="continueRefresh"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-bell"/></svg></span>
+        <div class="body"><b>Only alert once</b><span>One notification per session</span></div>
+        <label class="sw"><input type="checkbox" id="alertOnce"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-form"/></svg></span>
+        <div class="body"><b>Copy match to clipboard</b><span>The matched text is ready to paste</span></div>
+        <label class="sw"><input type="checkbox" id="copyToClipboard"><i></i></label>
+      </div>
+      <label class="fld"><span>Webhook URL <em class="hint">optional — POSTs the match as JSON</em></span>
+        <input type="text" id="webhook" placeholder="https://hooks.example.com/..."></label>
+      <button class="btn wide" id="testAlert">Send a test alert</button>
+    </div>
+  </div>
+
+  <div class="sec closed" id="sec-prof">
+    <button class="sec-h" data-sec="sec-prof">Profiles &amp; templates<svg class="chev"><use href="#i-chev"/></svg></button>
+    <div class="sec-body">
+      <label class="fld"><span>Save the current setup as a profile</span>
+        <div class="kw-add">
+          <input type="text" id="profileName" placeholder="Name">
+          <button class="btn sm" id="saveProfile">Save</button>
+        </div>
+      </label>
+      <label class="fld"><span>Load a profile</span>
+        <div class="kw-add">
+          <select id="profileSelect"><option value="">—</option></select>
+          <button class="btn sm" id="loadProfile">Load</button>
+        </div>
+      </label>
+      <label class="fld"><span>Keyword templates</span>
+        <div class="kw-add">
+          <select id="tplSelect"><option value="">—</option></select>
+          <button class="btn sm" id="tplSave">Save set</button>
+        </div>
+      </label>
+    </div>
+  </div>
+
+</section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="popup.js"></script>
+</body>
+</html>
