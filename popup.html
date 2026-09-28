@@ -43,7 +43,7 @@
 <header>
   <div class="logo"><svg><use href="#i-radar"/></svg></div>
   <div class="ttl">
-    <h1>Refresh Radar <span class="ver">v3.0</span></h1>
+    <h1>Refresh Radar <span class="ver">v4.0</span></h1>
     <p id="status">Idle</p>
   </div>
   <button id="pause" class="icon-btn hidden" title="Pause / resume"><svg><use href="#i-pause"/></svg></button>
@@ -69,19 +69,25 @@
     <button data-v="custom"><svg><use href="#i-sliders"/></svg>Custom</button>
   </div>
 
+  <div class="card">
+    <span class="ic"><svg><use href="#i-swap"/></svg></span>
+    <div class="body"><b>Reload the page</b><span>Turn off to watch a self-updating app without reloading it</span></div>
+    <label class="sw"><input type="checkbox" id="refreshEnabled"><i></i></label>
+  </div>
+
   <div id="fixedWrap">
     <div class="stepper">
       <div class="cap"><span>Interval</span><span>seconds</span></div>
       <div class="val">
         <button id="minus">−</button>
-        <input type="number" id="is" min="1" value="30">
+        <input type="number" id="is" min="0.2" step="0.5" value="0.5">
         <button id="plus">+</button>
       </div>
     </div>
     <div class="chips" id="presets">
-      <button data-s="2">2s</button><button data-s="5">5s</button><button data-s="10">10s</button>
-      <button data-s="15">15s</button><button data-s="30">30s</button><button data-s="60">1m</button>
-      <button data-s="300">5m</button><button data-s="900">15m</button>
+      <button data-s="0.5">0.5s</button><button data-s="1">1s</button><button data-s="2">2s</button>
+      <button data-s="5">5s</button><button data-s="10">10s</button><button data-s="30">30s</button>
+      <button data-s="60">1m</button><button data-s="300">5m</button>
     </div>
   </div>
 
@@ -237,6 +243,9 @@
   </div>
 
   <div class="stats" id="stats"></div>
+  <button class="btn wide" id="recommend">Use recommended settings</button>
+  <p class="note" style="margin-top:8px">0.5s reload · scan every 500ms · notify with sound ·
+    in-page banner · keep watching after a match.</p>
 </section>
 
 <!-- ================================================================ TABS -->
@@ -292,6 +301,9 @@
     <div class="kw-list" id="kwList"></div>
     <div class="empty-note hidden" id="kwEmpty">No keywords yet — add at least one to start monitoring.</div>
 
+    <button class="btn wide" id="kwTest" style="margin-bottom:8px">Find on this page now</button>
+    <div class="empty-note hidden" id="findResult" style="text-align:left"></div>
+
     <div class="btnrow">
       <button class="btn sm" id="kwDefaults">Defaults</button>
       <button class="btn sm" id="kwImport">Import</button>
@@ -315,18 +327,26 @@
   <div class="sec closed" id="sec-area">
     <button class="sec-h" data-sec="sec-area">Monitored area<svg class="chev"><use href="#i-chev"/></svg></button>
     <div class="sec-body">
-      <label class="fld"><span>Limit the search to one region <em class="hint">blank = whole page</em></span>
+      <div class="two">
+        <label class="fld"><span>Scope</span>
+          <select id="selectorType">
+            <option value="css">CSS selector</option>
+            <option value="xpath">XPath</option>
+            <option value="column">Table column</option>
+          </select></label>
+        <label class="fld"><span>Wait before scanning</span>
+          <input type="number" id="postLoadDelay" min="0" value="0"></label>
+      </div>
+      <label class="fld"><span id="selLabel">Limit the search to one region <em class="hint">blank = whole page</em></span>
         <div class="kw-add">
           <input type="text" id="selector" placeholder="#price, .status, //div[@id='x']">
           <button class="btn sm" id="pick"><svg style="width:13px;height:13px;vertical-align:-2px"><use href="#i-target"/></svg> Pick</button>
         </div>
       </label>
-      <div class="two">
-        <label class="fld"><span>Selector type</span>
-          <select id="selectorType"><option value="css">CSS</option><option value="xpath">XPath</option></select></label>
-        <label class="fld"><span>Wait before scanning</span>
-          <input type="number" id="postLoadDelay" min="0" value="0"></label>
-      </div>
+      <p class="note hidden" id="colNote">Type the column heading exactly as it appears, e.g. <code>Assigned to</code>.
+        Only cells in that column are searched, so a sidebar link or a saved-list name with the same
+        wording is ignored. Use the keyword <code>(empty)</code> to catch blank cells — that's how an
+        unassigned row usually looks.</p>
       <div class="card">
         <span class="ic"><svg><use href="#i-code"/></svg></span>
         <div class="body"><b>Search HTML source</b><span>Look inside the markup, not just visible text</span></div>
@@ -336,6 +356,20 @@
         <span class="ic"><svg><use href="#i-flash"/></svg></span>
         <div class="body"><b>Real-time detection</b><span>React to live DOM changes between reloads</span></div>
         <label class="sw"><input type="checkbox" id="liveWatch"><i></i></label>
+      </div>
+      <label class="fld"><span>Keep scanning between reloads <em class="hint">ms, 0 = scan once per load</em></span>
+        <input type="number" id="rescanEvery" min="0" step="100" value="500"></label>
+      <p class="note">Apps that render their list a second or two after the page loads are the usual
+        reason a keyword is missed. This keeps looking until the next reload.</p>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-tabs"/></svg></span>
+        <div class="body"><b>Look inside iframes</b><span>Needed for apps that render in a frame, like ServiceNow</span></div>
+        <label class="sw"><input type="checkbox" id="scanFrames"><i></i></label>
+      </div>
+      <div class="card">
+        <span class="ic"><svg><use href="#i-target"/></svg></span>
+        <div class="body"><b>Deep scan components</b><span>Read text inside shadow DOM used by modern web apps</span></div>
+        <label class="sw"><input type="checkbox" id="deepScan"><i></i></label>
       </div>
     </div>
   </div>
@@ -432,6 +466,15 @@
         <div class="body"><b>Only alert once</b><span>One notification per session</span></div>
         <label class="sw"><input type="checkbox" id="alertOnce"><i></i></label>
       </div>
+      <label class="fld"><span>Alert me</span>
+        <select id="alertMode">
+          <option value="edge">Only when the condition changes</option>
+          <option value="reload">Every reload the word is found</option>
+          <option value="every">Every scan, live updates included</option>
+        </select>
+      </label>
+      <div class="inline" style="margin-bottom:11px"><span class="unit">Minimum gap between alerts</span>
+        <input type="number" id="alertCooldown" min="0" value="60"><span class="unit">sec</span></div>
       <div class="card">
         <span class="ic"><svg><use href="#i-form"/></svg></span>
         <div class="body"><b>Copy match to clipboard</b><span>The matched text is ready to paste</span></div>

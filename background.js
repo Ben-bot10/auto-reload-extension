@@ -11,7 +11,7 @@ const DEFAULTS = {
   /* ---- interval ---- */
   refreshEnabled: true,
   intervalMode: 'fixed',       // fixed | random
-  interval: 30,                // seconds
+  interval: 0.5,               // seconds; sub-second allowed, floor 0.2
   intervalMin: 20,
   intervalMax: 60,
   hardReload: false,
@@ -47,7 +47,11 @@ const DEFAULTS = {
   selectorType: 'css',
   searchSource: false,
   liveWatch: true,
+  liveDebounce: 800,           // ms to settle after DOM mutations
+  rescanEvery: 500,            // ms — keep scanning between reloads (0 = off)
   postLoadDelay: 0,
+  scanFrames: true,            // also look inside iframes (SPAs render there)
+  deepScan: true,              // walk open shadow roots (web-component apps)
 
   /* ---- actions ---- */
   highlight: true,
@@ -56,7 +60,7 @@ const DEFAULTS = {
   autoClickTarget: '',
   autoClickNewTab: false,
   autoClickDelay: 500,
-  flashPage: false,
+  flashPage: true,             // an in-page banner still shows if the OS blocks toasts
   scriptOnLoad: '',
   scriptOnMatch: '',
 
@@ -67,8 +71,10 @@ const DEFAULTS = {
   soundTone: 'chime',          // beep | chime | alarm | siren | ding | custom
   soundRepeat: 3,
   volume: 0.7,
-  focusTab: true,
-  stopOnMatch: true,
+  focusTab: false,
+  stopOnMatch: false,          // keep watching a queue after the first hit
+  alertMode: 'edge',           // edge | reload | every
+  alertCooldown: 30,           // seconds; minimum gap between alerts
   alertOnce: false,
   copyToClipboard: false,
   webhook: ''
@@ -98,9 +104,10 @@ async function load() {
   if (state) return state;
   if (loading) return loading;
   loading = (async () => {
-    const raw = await chrome.storage.local.get(['sessions', 'profiles', 'log', 'defaults', 'settings']);
+    const raw = await chrome.storage.local.get(['sessions', 'pending', 'profiles', 'log', 'defaults', 'settings']);
     state = {
       sessions: raw.sessions || {},
+      pending: raw.pending || [],          // watches waiting for their tab to come back
       profiles: (raw.profiles || []).map(p => Object.assign({}, p, { cfg: migrate(p.cfg) })),
       log: raw.log || [],
       defaults: migrate(raw.defaults || {}),
@@ -135,12 +142,35 @@ function migrate(cfg) {
   return c;
 }
 
-async function save() {
+/* At a half-second interval the worker would otherwise write to disk twice a
+ * second forever. Coalesce routine writes; anything that must survive an
+ * immediate crash (a match, start, stop) calls save(true). */
+let saveTimer = null;
+let savePending = false;
+
+async function flush() {
+  savePending = false;
   await chrome.storage.local.set({
-    sessions: state.sessions, profiles: state.profiles, log: state.log,
-    defaults: state.defaults, settings: state.settings
+    sessions: state.sessions, pending: state.pending, profiles: state.profiles,
+    log: state.log, defaults: state.defaults, settings: state.settings
   });
   if (state.settings.syncEnabled) pushSync();
+}
+
+function save(immediate) {
+  if (immediate) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    return flush();
+  }
+  savePending = true;
+  if (!saveTimer) {
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      if (savePending) flush();
+    }, 2000);
+  }
+  return Promise.resolve();
 }
 
 let syncTimer = null;
@@ -172,6 +202,9 @@ function newSession(tabId, url, cfg) {
     tabId, url, active: true, paused: false,
     cfg: migrate(cfg),
     baseline: null, alerted: false, note: '', nextAt: 0,
+    condTrue: false,      // is the watched condition currently satisfied?
+    frameTrueAt: 0,       // last time a sub-frame said yes
+    lastAlertAt: 0, lastAlertKey: '', lastScanAt: 0, recovered: 0, notifyFailed: 0,
     stats: { loads: 0, refreshes: 0, matches: 0, errors: 0, startedAt: Date.now(), lastMatchAt: 0, lastExcerpt: '' }
   };
 }
@@ -180,15 +213,17 @@ function newSession(tabId, url, cfg) {
 
 const parseWhen = (v) => { if (!v) return 0; const t = new Date(v).getTime(); return isNaN(t) ? 0 : t; };
 
+const FLOOR_SECS = 0.2;
+
 function baseDelayMs(cfg, first) {
-  if (first && cfg.startDelay > 0) return Math.max(1, cfg.startDelay) * 1000;
+  if (first && cfg.startDelay > 0) return Math.max(FLOOR_SECS, cfg.startDelay) * 1000;
   let secs;
   if (cfg.intervalMode === 'random') {
-    const lo = Math.max(1, Math.min(cfg.intervalMin, cfg.intervalMax));
-    const hi = Math.max(1, Math.max(cfg.intervalMin, cfg.intervalMax));
+    const lo = Math.max(FLOOR_SECS, Math.min(cfg.intervalMin, cfg.intervalMax));
+    const hi = Math.max(FLOOR_SECS, Math.max(cfg.intervalMin, cfg.intervalMax));
     secs = lo + Math.random() * (hi - lo);
   } else {
-    secs = Math.max(1, Number(cfg.interval) || 30);
+    secs = Math.max(FLOOR_SECS, Number(cfg.interval) || 0.5);
   }
   return Math.round(secs * 1000);
 }
@@ -233,10 +268,63 @@ async function setBadge(tabId, text, color) {
 }
 
 function fmtCountdown(ms) {
+  if (ms > 0 && ms < 1000) return '<1';
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 100) return String(s);
   const m = Math.floor(s / 60);
   return m < 100 ? m + 'm' : '99+';
+}
+
+/* Two URLs that mean "the same page" even if query params drift. */
+function sameTarget(a, b) {
+  try {
+    const x = new URL(a), y = new URL(b);
+    return x.origin === y.origin && x.pathname === y.pathname;
+  } catch (e) { return a === b; }
+}
+
+const PENDING_TTL = 36 * 60 * 60 * 1000;       // give up after a day and a half
+
+function park(sess, why) {
+  if (!sess || !sess.active) return;
+  sess.pendingSince = Date.now();
+  sess.note = why || 'waiting for the tab to come back';
+  state.pending = (state.pending || []).filter(p => !sameTarget(p.url, sess.url));
+  state.pending.push(sess);
+  if (state.pending.length > 30) state.pending.shift();
+}
+
+/* A parked watch re-attaches itself as soon as a matching page loads again —
+ * after a window close, a browser restart or a reboot with session restore. */
+async function adopt(tab) {
+  if (!tab || !tab.url || !/^https?:/.test(tab.url)) return false;
+  if (state.sessions[tab.id] && state.sessions[tab.id].active) return false;
+  const list = state.pending || [];
+  const now = Date.now();
+  let idx = list.findIndex(p => p.url === tab.url);
+  if (idx < 0) idx = list.findIndex(p => sameTarget(p.url, tab.url));
+  if (idx < 0) return false;
+
+  const sess = list[idx];
+  if (now - (sess.pendingSince || now) > PENDING_TTL) { list.splice(idx, 1); await save(); return false; }
+
+  list.splice(idx, 1);
+  sess.tabId = tab.id;
+  sess.url = tab.url;
+  sess.active = true;
+  sess.paused = false;
+  sess.note = 'resumed after the tab came back';
+  sess.recovered = (sess.recovered || 0) + 1;
+  const d = reloadBudget(sess, false);
+  sess.nextAt = d === null ? 0 : now + d;
+  state.sessions[tab.id] = sess;
+
+  updatePower();
+  await save(true);
+  await armClock();
+  await setBadge(tab.id, 'ON', '#10b981');
+  await kick(tab.id);
+  return true;
 }
 
 function updatePower() {
@@ -266,6 +354,30 @@ async function ensureOffscreen() {
 
 function toOffscreen(msg) {
   return chrome.runtime.sendMessage(Object.assign({ target: 'offscreen' }, msg)).catch(() => {});
+}
+
+/* The clock lives in the offscreen document, and Chrome can reclaim it. If its
+ * heartbeat goes quiet while work is outstanding, rebuild it — otherwise the
+ * watch stalls until the once-a-minute alarm notices, which at a half-second
+ * interval is an eternity. */
+let lastClockBeat = 0;
+
+async function ensureClockAlive() {
+  const busy = Object.values(state.sessions).some(s => s.active && !s.paused && s.nextAt);
+  if (!busy) return;
+  let has = false;
+  try { has = await chrome.offscreen.hasDocument(); } catch (e) {}
+  const quiet = lastClockBeat && Date.now() - lastClockBeat > 8000;
+  if (!has || quiet) {
+    if (!has) {
+      for (const s of Object.values(state.sessions)) {
+        if (s.active && !s.paused) s.recovered = (s.recovered || 0) + 1;
+      }
+    }
+    await ensureOffscreen();
+    await armClock();
+    lastClockBeat = Date.now();
+  }
 }
 
 /* Push every live deadline to the clock. Called after any state change and
@@ -300,11 +412,31 @@ async function doReload(tabId) {
   await load();
   const sess = state.sessions[tabId];
   if (!sess || !sess.active || sess.paused) return;
-  if (reloading[tabId] && Date.now() - reloading[tabId] < 1500) return;
+  /* Guards only against the clock and the sweep firing the same deadline at
+   * the same instant — it must stay well under the shortest usable interval,
+   * and it must re-arm rather than leaving the session with a stale deadline. */
+  const guard = Math.min(200, Math.max(50, baseDelayMs(sess.cfg, false) / 3));
+  if (reloading[tabId] && Date.now() - reloading[tabId] < guard) {
+    sess.nextAt = Date.now() + baseDelayMs(sess.cfg, false);
+    await save();
+    await armClock();
+    return;
+  }
   reloading[tabId] = Date.now();
 
   let tab = null;
-  try { tab = await chrome.tabs.get(tabId); } catch (e) { delete state.sessions[tabId]; await save(); return; }
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (e) {
+    /* The tab is gone — after a restart its id is stale. Park the watch so it
+     * can re-attach instead of disappearing without a word. */
+    delete state.sessions[tabId];
+    park(sess, 'tab closed — will resume if it reopens');
+    updatePower();
+    await save(true);
+    await armClock();
+    return;
+  }
 
   if (sess.cfg.onlyWhenHidden && tab.active) {          // you're looking at it — wait
     sess.nextAt = Date.now() + 2000;
@@ -323,8 +455,11 @@ async function doReload(tabId) {
     }
   } catch (e) {}
 
-  // Provisional next deadline; the content script's REPORT will refine it.
-  sess.nextAt = Date.now() + Math.max(3000, baseDelayMs(sess.cfg, false));
+  /* Provisional next deadline, refined by the page's REPORT when it lands. It
+   * has to allow a little slack for the load itself, but never so much that it
+   * overrides a deliberately short interval. */
+  const base = baseDelayMs(sess.cfg, false);
+  sess.nextAt = Date.now() + Math.max(base, Math.min(3000, base * 4));
   await save();
   await armClock();
 }
@@ -357,11 +492,12 @@ async function raiseAlert(sess, payload) {
   });
   if (state.log.length > MAX_LOG) state.log.length = MAX_LOG;
 
+  let notified = false;
   if (cfg.notify) {
     const id = 'rr-' + when + '-' + sess.tabId;
     notifTab[id] = sess.tabId;
     try {
-      await chrome.notifications.create(id, {
+      const made = await chrome.notifications.create(id, {
         type: 'basic',
         iconUrl: chrome.runtime.getURL('icons/icon128.png'),
         title: 'Match: ' + (payload.title || hostOf(sess.url)),
@@ -369,7 +505,19 @@ async function raiseAlert(sess, payload) {
         contextMessage: hostOf(sess.url),
         priority: 2, requireInteraction: !!cfg.sticky, silent: false
       });
-    } catch (e) {}
+      notified = !!made;
+    } catch (e) { notified = false; }
+    if (!notified) sess.notifyFailed = (sess.notifyFailed || 0) + 1;
+  }
+
+  /* Windows Focus Assist, Do Not Disturb or a denied permission swallow toasts
+   * silently. The in-page banner does not depend on the OS, so it is the
+   * fallback whenever the toast could not be created. */
+  if (cfg.flashPage || (cfg.notify && !notified)) {
+    chrome.tabs.sendMessage(sess.tabId, {
+      type: 'RR_BANNER', text: payload.excerpt || describeMode(cfg),
+      warn: cfg.notify && !notified
+    }, { frameId: 0 }).catch(() => {});
   }
 
   if (cfg.sound) playSound(cfg);
@@ -431,9 +579,23 @@ chrome.notifications.onClosed.addListener((id) => { delete notifTab[id]; });
 
 /* ------------------------------------------------------------- messaging */
 
+/* Reports from the page (and its frames) can arrive at the same moment. Without
+ * this, two of them both see an active session and both raise an alert — which
+ * is how one match turns into a burst of notifications. One queue per tab. */
+const queues = {};
+function serial(key, fn) {
+  const prev = queues[key] || Promise.resolve();
+  const next = prev.then(fn, fn);
+  queues[key] = next.then(() => {}, () => {});
+  return next;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.target === 'offscreen') return false;
-  handle(msg, sender).then(sendResponse).catch((e) => sendResponse({ error: String(e) }));
+  const id = (sender && sender.tab) ? sender.tab.id : msg.tabId;
+  serial(id == null ? 'global' : 't' + id, () => handle(msg, sender))
+    .then(sendResponse)
+    .catch((e) => sendResponse({ error: String(e) }));
   return true;
 });
 
@@ -442,6 +604,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'rr-keepalive') return;
   port.onMessage.addListener(async () => {
+    lastClockBeat = Date.now();
     await load();
     await sweep();
   });
@@ -457,11 +620,15 @@ async function handle(msg, sender) {
     /* --------------------------------------------------- clock callbacks */
 
     case 'OC_FIRE': {
+      lastClockBeat = Date.now();
       for (const id of msg.tabIds || []) await doReload(Number(id));
       return { ok: true };
     }
 
+    case 'OC_PING': { lastClockBeat = Date.now(); return { ok: true }; }
+
     case 'OC_TICK': {
+      lastClockBeat = Date.now();
       for (const it of msg.items || []) {
         const s = state.sessions[it.tabId];
         if (!s || !s.active) continue;
@@ -476,6 +643,13 @@ async function handle(msg, sender) {
 
     case 'CS_INIT': {
       let sess = state.sessions[tabId];
+
+      /* A sub-frame joins an existing watch; it never starts one, never counts
+       * as a page load and never triggers the navigation rules below. */
+      if (msg.frame) {
+        if (!sess || !sess.active || sess.paused) return { active: false };
+        return { active: true, cfg: sess.cfg, frame: true };
+      }
 
       if (!sess || !sess.active) {
         const prof = state.profiles.find(p => p.autoStart && matchesPattern(p.pattern, msg.url));
@@ -506,19 +680,72 @@ async function handle(msg, sender) {
       const sess = state.sessions[tabId];
       if (!sess || !sess.active || sess.paused) return { stop: true, deadline: 0 };
       const cfg = sess.cfg;
+      const isFrame = !!msg.frame;
+      const now = Date.now();
+
+      /* Sub-frames only ever provide positive evidence in "found" mode: a frame
+       * that cannot see the keyword proves nothing about the page as a whole. */
+      if (isFrame && (cfg.mode !== 'found' || cfg.scanFrames === false || !msg.found)) {
+        if (isFrame && msg.found) sess.frameTrueAt = now;
+        return { stop: false, matched: false, deadline: sess.nextAt };
+      }
+
       let hit = false;
+      let condNow = false;
 
       if (cfg.monitorEnabled) {
         if (cfg.mode === 'change') {
           if (sess.baseline !== null && msg.sig !== sess.baseline) hit = true;
           sess.baseline = msg.sig;
-        } else if (cfg.mode === 'lost') {
-          hit = !msg.found;
+          condNow = hit;
         } else {
-          hit = !!msg.found;
+          condNow = cfg.mode === 'lost' ? !msg.found : !!msg.found;
+          hit = condNow;
         }
       }
+
+      /* Track whether the condition is *currently* true, so we can alert on the
+       * transition rather than on every scan while it stays true. A frame's yes
+       * keeps the condition alive briefly even if the top frame cannot see it. */
+      if (cfg.mode !== 'change') {
+        if (isFrame) {
+          if (condNow) sess.frameTrueAt = now;
+        } else if (!condNow && now - (sess.frameTrueAt || 0) > 4000) {
+          sess.condTrue = false;
+        }
+        const wasTrue = sess.condTrue;
+        if (condNow) sess.condTrue = true;
+        if (hit) {
+          if (cfg.alertMode === 'reload') hit = !msg.live;   // one check per page load
+          else if (cfg.alertMode !== 'every' && wasTrue) hit = false;   // already reported
+        }
+      }
+
+      /* Backstop for chatty pages: never two alerts inside the cooldown, and
+       * never the same excerpt twice in a row. */
+      const key = (msg.excerpt || '').slice(0, 160);
+      if (hit) {
+        const cool = Math.max(0, Number(cfg.alertCooldown) || 0) * 1000;
+        if (cool && sess.lastAlertAt && now - sess.lastAlertAt < cool) hit = false;
+        else if (cfg.alertMode === 'edge' && key && key === sess.lastAlertKey &&
+                 now - sess.lastAlertAt < 600000) hit = false;
+      }
       if (hit && cfg.alertOnce && sess.alerted) hit = false;
+
+      if (hit) {
+        sess.lastAlertAt = now;
+        sess.lastAlertKey = key;
+      }
+
+      if (isFrame) {                       // frames never drive the countdown
+        if (hit) {
+          await raiseAlert(sess, msg);
+          if (cfg.stopOnMatch) { sess.active = false; sess.nextAt = 0; updatePower(); }
+        }
+        await save();
+        if (hit && cfg.stopOnMatch) await armClock();
+        return { stop: !sess.active, matched: hit, deadline: sess.nextAt };
+      }
 
       if (hit) {
         await raiseAlert(sess, msg);
@@ -531,15 +758,24 @@ async function handle(msg, sender) {
         }
       }
 
-      const now = Date.now();
+      /* A live re-check must never touch the countdown. It used to recompute
+       * nextAt on every report, so a page that mutates (or a scan loop) pushed
+       * the reload deadline forward indefinitely and reloads quietly stopped. */
+      if (msg.live) {
+        sess.lastScanAt = now;
+        await save();
+        return { stop: false, matched: hit, deadline: sess.nextAt };
+      }
+
       const keep = cfg.continuousTimer && sess.nextAt > now;   // "don't restart the timer"
       const nd = keep ? sess.nextAt - now : reloadBudget(sess, true);
       const exhausted = cfg.refreshEnabled && nd === null;
-      const done = exhausted && !cfg.liveWatch;
+      const done = exhausted && !cfg.liveWatch && !cfg.rescanEvery;
 
       sess.nextAt = nd === null ? 0 : now + nd;
+      sess.lastScanAt = now;
       if (done) { sess.active = false; updatePower(); }
-      await save(); await armClock();
+      await save(hit || done); await armClock();
 
       if (!hit) await setBadge(tabId, nd === null ? 'ON' : fmtCountdown(nd), '#10b981');
       return { stop: done, matched: hit, deadline: sess.nextAt };
@@ -578,7 +814,7 @@ async function handle(msg, sender) {
     case 'RUN_SCRIPT': {
       try {
         await chrome.scripting.executeScript({
-          target: { tabId }, world: 'MAIN',
+          target: { tabId, frameIds: [0] }, world: 'MAIN',   // top frame only
           args: [String(msg.code || ''), msg.context || {}],
           func: (code, ctx) => {
             try {
@@ -670,10 +906,12 @@ async function handle(msg, sender) {
         await setBadge(n, '');
         try { await chrome.tabs.sendMessage(n, { type: 'RR_STOP' }); } catch (e) {}
       }
+      const parked = (state.pending || []).length;
       state.sessions = {};
+      state.pending = [];
       updatePower();
-      await save(); await armClock();
-      return { ok: true, stopped: ids.length };
+      await save(true); await armClock();
+      return { ok: true, stopped: ids.length + parked };
     }
 
     case 'APPLY_ALL': {
@@ -709,6 +947,38 @@ async function handle(msg, sender) {
       await save(); await armClock();
       await setBadge(tab.id, 'ON', '#10b981');
       return { ok: true, tabId: tab.id };
+    }
+
+    /* Run the keyword search on the page right now and report what it finds,
+     * across every frame — the answer to "would Ctrl+F match this?" */
+    case 'FIND_NOW': {
+      const id = msg.tabId;
+      let frames = [{ frameId: 0 }];
+      try { frames = await chrome.webNavigation.getAllFrames({ tabId: id }) || frames; } catch (e) {}
+      const per = [];
+      for (const f of frames.slice(0, 20)) {
+        try {
+          const r = await chrome.tabs.sendMessage(id, { type: 'RR_FIND', cfg: msg.cfg }, { frameId: f.frameId });
+          if (r && !r.error) per.push(Object.assign({ frameId: f.frameId }, r));
+        } catch (e) { /* no content script in that frame */ }
+      }
+      if (!per.length) return { ok: false, error: 'Cannot read this page — try a normal http(s) page.' };
+
+      const totals = {};
+      let excerpt = '', scope = per[0].scope, frames_with_hits = 0;
+      for (const p of per) {
+        let any = false;
+        for (const k of p.keywords) {
+          totals[k.value] = (totals[k.value] || 0) + k.count;
+          if (k.count) any = true;
+        }
+        if (any) frames_with_hits++;
+        if (!excerpt && p.excerpt) excerpt = p.excerpt;
+      }
+      return {
+        ok: true, scope, excerpt, frames: per.length, framesWithHits: frames_with_hits,
+        keywords: Object.keys(totals).map(v => ({ value: v, count: totals[v] }))
+      };
     }
 
     case 'PICK': {
@@ -775,10 +1045,26 @@ async function handle(msg, sender) {
         out.push({
           tabId: Number(id), url: s.url, title, paused: !!s.paused, note: s.note || '',
           remaining: s.nextAt ? Math.max(0, s.nextAt - Date.now()) : 0,
+          recovered: s.recovered || 0,
           stats: s.stats, keywords: (s.cfg.keywords || []).map(k => k.value)
         });
       }
+      /* Parked watches are listed too — a watch waiting for its tab should be
+       * visible, not a silent nothing. */
+      for (const p of state.pending || []) {
+        out.push({
+          tabId: null, url: p.url, title: p.note || 'waiting for the page',
+          paused: false, waiting: true, note: p.note || '', remaining: 0,
+          stats: p.stats, keywords: (p.cfg.keywords || []).map(k => k.value)
+        });
+      }
       return { sessions: out };
+    }
+
+    case 'CLEAR_PENDING': {
+      state.pending = [];
+      await save(true);
+      return { ok: true };
     }
   }
   return { error: 'unknown message ' + msg.type };
@@ -798,9 +1084,52 @@ async function sweep() {
   const now = Date.now();
   const due = [];
   for (const [id, s] of Object.entries(state.sessions)) {
-    if (s.active && !s.paused && s.nextAt && s.nextAt <= now) due.push(Number(id));
+    if (!s.active || s.paused) continue;
+    if (s.nextAt && s.nextAt <= now) {
+      /* Overdue by more than a couple of cycles means something stalled — the
+       * clock died, the worker was evicted, the machine slept. Count it so the
+       * popup can say so instead of the user just seeing nothing happen. */
+      if (now - s.nextAt > Math.max(4000, baseDelayMs(s.cfg, false) * 3)) {
+        s.recovered = (s.recovered || 0) + 1;
+      }
+      due.push(Number(id));
+    }
   }
   for (const id of due) await doReload(id);
+  await ensureClockAlive();
+  await armClock();
+}
+
+/* Re-attach every stored watch to a real tab. Exact URL first, then same
+ * origin+path (list URLs carry params that drift), then park it. */
+async function rebind() {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch (e) { return; }
+  const taken = {};
+  const fresh = {};
+
+  for (const [id, sess] of Object.entries(state.sessions)) {
+    if (!sess.active) continue;
+    let tab = tabs.find(t => t.id === Number(id) && t.url);
+    if (!tab) tab = tabs.find(t => t.url === sess.url && !taken[t.id]);
+    if (!tab) tab = tabs.find(t => sameTarget(t.url || '', sess.url) && !taken[t.id]);
+
+    if (!tab) { park(sess, 'waiting for the page to reopen'); continue; }
+
+    taken[tab.id] = true;
+    if (tab.id !== Number(id)) sess.recovered = (sess.recovered || 0) + 1;
+    sess.tabId = tab.id;
+    sess.url = tab.url || sess.url;
+    const d = reloadBudget(sess, false);
+    sess.nextAt = d === null ? 0 : Date.now() + d;
+    fresh[tab.id] = sess;
+    kick(tab.id);
+  }
+
+  state.sessions = fresh;
+  updatePower();
+  await save(true);
+  await ensureClockAlive();
   await armClock();
 }
 
@@ -812,15 +1141,32 @@ chrome.alarms.onAlarm.addListener(async (a) => {
   await load();
   await ensureOffscreen();
   await sweep();
+  /* Expire watches nobody is coming back for. */
+  const now = Date.now();
+  const before = (state.pending || []).length;
+  state.pending = (state.pending || []).filter(p => now - (p.pendingSince || now) < PENDING_TTL);
+  if (state.pending.length !== before) await save();
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId, info) => {
   await load();
-  if (state.sessions[tabId]) {
-    delete state.sessions[tabId];
-    updatePower();
-    await save(); await armClock();
-  }
+  const sess = state.sessions[tabId];
+  if (!sess) return;
+  delete state.sessions[tabId];
+  /* Closing the window (or shutting down) is not the same as closing the tab:
+   * park the watch so it comes back, rather than losing it on every restart. */
+  if (info && info.isWindowClosing) park(sess, 'window closed — will resume when the page reopens');
+  updatePower();
+  await save(true);
+  await armClock();
+});
+
+/* Any page finishing a load is a chance to re-attach a parked watch. */
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.status !== 'complete') return;
+  await load();
+  if (!state.pending || !state.pending.length) return;
+  await adopt(tab);
 });
 
 chrome.webNavigation.onErrorOccurred.addListener(async (d) => {
@@ -837,28 +1183,21 @@ chrome.webNavigation.onErrorOccurred.addListener(async (d) => {
 chrome.runtime.onStartup.addListener(async () => {
   await load();
   if (state.settings.syncEnabled) await pullSync();
-  const tabs = await chrome.tabs.query({});
-  const fresh = {};
-  for (const sess of Object.values(state.sessions)) {
-    if (!sess.active) continue;
-    const tab = tabs.find(t => t.url === sess.url && !fresh[t.id]);
-    if (!tab) continue;
-    sess.tabId = tab.id;
-    const d = reloadBudget(sess, false);
-    sess.nextAt = d === null ? 0 : Date.now() + d;
-    fresh[tab.id] = sess;
-    kick(tab.id);
-  }
-  state.sessions = fresh;
-  updatePower();
-  await save();
   await ensureOffscreen();
-  await armClock();
+  await rebind();
+  /* Session restore reopens tabs a little after the browser starts, so give
+   * parked watches a second chance once the dust settles. */
+  setTimeout(async () => {
+    await load();
+    let tabs = [];
+    try { tabs = await chrome.tabs.query({}); } catch (e) { return; }
+    for (const t of tabs) await adopt(t);
+  }, 8000);
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
   await load();
-  await save();
+  await save(true);
   await ensureOffscreen();
   await armClock();
 });
@@ -876,5 +1215,10 @@ chrome.commands.onCommand.addListener(async (cmd) => {
   }
 });
 
-/* Cold start of the worker for any reason: make sure the clock is running. */
-load().then(async () => { await ensureOffscreen(); await sweep(); });
+/* Cold start of the worker for any reason — eviction, crash, restart: rebuild
+ * the clock and catch up on anything that was missed while it was gone. */
+load().then(async () => {
+  await ensureOffscreen();
+  await rebind();
+  await sweep();
+});

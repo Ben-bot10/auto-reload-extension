@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Refresh Radar — Auto Reload & Page Monitor",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "description": "Auto-refresh and monitor any page for keywords, elements or changes — and keep running while the window is minimized. Every feature unlocked.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -43,7 +43,7 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle",
-      "all_frames": false
+      "all_frames": true
     }
   ],
   "commands": {

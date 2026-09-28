@@ -8,12 +8,18 @@
   if (window.__REFRESH_RADAR__) return;
   window.__REFRESH_RADAR__ = true;
 
+  /* Single-page apps often render the real content inside an iframe, so the
+   * script runs in every frame. Only the top frame owns the UI; sub-frames
+   * just scan and report what they can see. */
+  let IS_TOP = true;
+  try { IS_TOP = window.top === window; } catch (e) { IS_TOP = false; }
+
   const SCROLL_KEY = '__rr_scroll__';
   const FORM_KEY = '__rr_forms__';
 
   let cfg = null;
   let deadline = 0;
-  let display = null, idleTimer = null, moTimer = null;
+  let display = null, idleTimer = null, moTimer = null, rescanTimer = null;
   let observer = null;
   let running = false;
   let heldByUser = false;
@@ -28,8 +34,13 @@
       case 'RR_STOP': teardown(); send({ ok: true }); break;
       case 'RR_START': boot(); send({ ok: true }); break;
       case 'RR_STATUS': send({ running, held: heldByUser, remaining: Math.max(0, deadline - Date.now()) }); break;
-      case 'RR_COPY': copyText(msg.text); send({ ok: true }); break;
-      case 'RR_PICK': startPicker(); send({ ok: true }); break;
+      case 'RR_COPY': if (IS_TOP) copyText(msg.text); send({ ok: true }); break;
+      case 'RR_PICK': if (IS_TOP) startPicker(); send({ ok: IS_TOP }); break;
+      case 'RR_FIND': send(findReport(msg.cfg)); break;
+      case 'RR_BANNER':
+        if (IS_TOP) withoutObserver(() => showBanner(msg.text, msg.warn));
+        send({ ok: IS_TOP });
+        break;
       case 'RR_DEADLINE': deadline = msg.deadline || 0; send({ ok: true }); break;
       default: send({ ok: false });
     }
@@ -44,13 +55,27 @@
     teardown();
     let res;
     try {
-      res = await chrome.runtime.sendMessage({ type: 'CS_INIT', url: location.href, title: document.title });
+      res = await chrome.runtime.sendMessage({
+        type: 'CS_INIT', url: location.href, title: document.title, frame: !IS_TOP
+      });
     } catch (e) { return; }
     if (!res || !res.active) return;
 
     cfg = res.cfg;
     deadline = res.deadline || 0;
     running = true;
+
+    /* Sub-frame: no overlay, no scroll/form state, no reload logic — it only
+     * looks for the keyword in the part of the app it can see. */
+    if (!IS_TOP) {
+      if (!cfg.monitorEnabled || cfg.scanFrames === false || cfg.mode !== 'found') { running = false; return; }
+      const fwait = Math.max(0, Number(cfg.postLoadDelay) || 0) * 1000;
+      if (fwait) { await sleep(fwait); if (!running) return; }
+      await report();
+      if (running && cfg.liveWatch) startObserver();
+      if (running) startRescan();
+      return;
+    }
 
     if (cfg.preserveScroll) restoreScroll();
     if (cfg.preserveForms) restoreForms();
@@ -75,12 +100,29 @@
 
     await report();
     if (running && cfg.liveWatch && cfg.monitorEnabled) startObserver();
+    if (running && cfg.monitorEnabled) startRescan();
+  }
+
+  /* Scanning once, at load, is the reason a keyword gets missed: an app that
+   * renders its list a second or two after DOMContentLoaded simply is not there
+   * yet. So keep looking for as long as the page is alive. These scans are
+   * marked `live`, which means they never touch the reload countdown. */
+  function startRescan() {
+    const every = Number(cfg.rescanEvery) || 0;
+    if (!every) return;
+    clearInterval(rescanTimer);
+    rescanTimer = setInterval(() => {
+      if (!running) return clearInterval(rescanTimer);
+      if (heldByUser) return;
+      liveCheck();
+    }, Math.max(200, every));
   }
 
   function teardown() {
     running = false;
     heldByUser = false;
     clearInterval(display); display = null;
+    clearInterval(rescanTimer); rescanTimer = null;
     clearTimeout(idleTimer); idleTimer = null;
     clearTimeout(moTimer); moTimer = null;
     if (observer) { observer.disconnect(); observer = null; }
@@ -97,13 +139,14 @@
     let res;
     try {
       res = await chrome.runtime.sendMessage({
-        type: 'REPORT', found: scan.found, sig: scan.sig,
+        type: 'REPORT', found: scan.found, sig: scan.sig, frame: !IS_TOP, live: false,
         excerpt: scan.excerpt, title: document.title, url: location.href
       });
     } catch (e) { teardown(); return; }
     if (!res) { teardown(); return; }
     if (res.matched) onMatch(scan);
     if (res.stop) { teardown(); return; }
+    if (!IS_TOP) return;
     deadline = res.deadline || 0;
     if (!deadline) setLabel('watching');
   }
@@ -127,6 +170,46 @@
     } catch (e) { return null; }
   }
 
+  /* ---------------------------------------------- shadow-piercing queries */
+
+  /* Component frameworks put the real markup inside shadow roots, where a plain
+   * document.querySelector cannot reach. Collect every open root once per scan
+   * and query them all. */
+  let _roots = null;
+
+  function allRoots() {
+    if (_roots) return _roots;
+    const roots = [document];
+    const budget = { n: 0 };
+    (function dig(root) {
+      let els;
+      try { els = root.querySelectorAll('*'); } catch (e) { return; }
+      const lim = Math.min(els.length, 20000);
+      for (let i = 0; i < lim; i++) {
+        if (++budget.n > NODE_BUDGET) return;
+        const sr = els[i].shadowRoot;
+        if (sr) { roots.push(sr); dig(sr); }
+      }
+    })(document);
+    _roots = roots;
+    return roots;
+  }
+
+  function deepQueryAll(sel, within) {
+    const out = [];
+    if (within) {
+      try { out.push.apply(out, within.querySelectorAll(sel)); } catch (e) {}
+      return out;
+    }
+    for (const r of allRoots()) {
+      try { out.push.apply(out, r.querySelectorAll(sel)); } catch (e) {}
+      if (out.length > 5000) break;
+    }
+    return out;
+  }
+
+  const deepQuery = (sel) => deepQueryAll(sel)[0] || null;
+
   function resolveEl(sel, type) {
     const s = (sel || '').trim();
     if (!s) return null;
@@ -135,18 +218,179 @@
         const r = document.evaluate(s, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
         return r.singleNodeValue && r.singleNodeValue.nodeType === 1 ? r.singleNodeValue : null;
       }
-      return document.querySelector(s);
+      return document.querySelector(s) || (cfg && cfg.deepScan !== false ? deepQuery(s) : null);
     } catch (e) { return null; }
   }
 
   function scopeRoot() {
     const sel = (cfg.selector || '').trim();
-    if (!sel) return document.body || document.documentElement;
+    if (!sel || cfg.selectorType === 'column') return document.body || document.documentElement;
     return resolveEl(sel, cfg.selectorType) || document.body || document.documentElement;
   }
 
+  /* ------------------------------------------------------ column scoping */
+
+  const cellText = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+
+  const isCell = (el) => {
+    const t = el.tagName;
+    if (t === 'TD' || t === 'TH') return true;
+    const r = el.getAttribute && el.getAttribute('role');
+    return r === 'gridcell' || r === 'cell' || r === 'rowheader' || r === 'columnheader';
+  };
+
+  const isHeaderCell = (el) =>
+    el.tagName === 'TH' || (el.getAttribute && el.getAttribute('role') === 'columnheader');
+
+  function rowOf(el) {
+    let n = el;
+    while (n && n.nodeType === 1) {
+      if (n.tagName === 'TR' || (n.getAttribute && n.getAttribute('role') === 'row')) return n;
+      n = n.parentElement;
+    }
+    return el.parentElement || el;
+  }
+
+  /* Every cell under the column whose header matches `name`, across every table
+   * or ARIA grid on the page (shadow roots included). This is what keeps
+   * "Unassigned" from matching a sidebar link of the same name. */
+  function columnCells(name) {
+    const want = name.toLowerCase().trim();
+    if (!want) return [];
+    const out = [];
+    const tables = deepQueryAll('table, [role="grid"], [role="table"], [role="treegrid"]');
+
+    for (const table of tables) {
+      const headers = deepQueryAll('th, [role="columnheader"]', table);
+      if (!headers.length) continue;
+
+      let idx = -1;
+      for (let i = 0; i < headers.length; i++) {
+        const txt = cellText(headers[i]).toLowerCase();
+        if (!txt) continue;
+        if (txt === want) { idx = i; break; }
+        if (idx < 0 && txt.indexOf(want) >= 0) idx = i;
+      }
+      if (idx < 0) continue;
+
+      const rows = deepQueryAll('tr, [role="row"]', table);
+      for (const row of rows) {
+        const cells = Array.from(row.children || []).filter(isCell);
+        if (cells.length <= idx) continue;
+        if (cells.some(isHeaderCell)) continue;            // the header row itself
+        const el = cells[idx];
+        out.push({ el, text: cellText(el), row: cellText(rowOf(el)).slice(0, 180) });
+      }
+    }
+    return out;
+  }
+
+  const EMPTY_TOKEN = /^\(\s*(empty|blank|none)\s*\)$/i;
+
+  /* Look for one keyword inside the scoped column's cells. */
+  function testInCells(k, cells) {
+    const type = (!k.type || k.type === 'auto') ? detectType(k.value) : k.type;
+    const v = (k.value || '').trim();
+    if (!v) return { found: false };
+
+    if (EMPTY_TOKEN.test(v)) {
+      const hit = cells.find(c => !c.text);
+      return hit
+        ? { found: true, el: hit.el, excerpt: 'Empty cell — ' + (hit.row || 'row') }
+        : { found: false };
+    }
+
+    if (type === 'regex') {
+      const rx = toRegex(v, cfg.caseSensitive);
+      if (!rx) return { found: false };
+      const hit = cells.find(c => rx.test(c.text));
+      return hit ? { found: true, el: hit.el, excerpt: hit.row || hit.text, needle: hit.text, rx } : { found: false };
+    }
+
+    const N = cfg.caseSensitive ? v : v.toLowerCase();
+    const hit = cells.find(c => (cfg.caseSensitive ? c.text : c.text.toLowerCase()).indexOf(N) >= 0);
+    return hit ? { found: true, el: hit.el, excerpt: hit.row || hit.text, needle: v } : { found: false };
+  }
+
+  /* Text the user can actually see.
+   *
+   * `textContent` pulls in <script> bodies — on an app like ServiceNow that
+   * means the embedded i18n/JSON bundle, which matches almost any keyword and
+   * produces useless alerts. `innerText` skips scripts and hidden nodes but
+   * cannot see inside shadow roots, which modern component frameworks use for
+   * everything. So: innerText as the base, plus a walk of open shadow roots
+   * that skips script-like tags. */
+  const SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, LINK: 1, META: 1, HEAD: 1 };
+  const NODE_BUDGET = 60000;
+
+  /* Ctrl+F does not find text that isn't rendered, so neither should we. Cheap
+   * checks only — a computed-style lookup per node would force a reflow on
+   * every scan. Note aria-hidden is deliberately NOT treated as hidden: it only
+   * affects assistive tech, the text is still on screen, and find-in-page
+   * matches it. */
+  function isHidden(el) {
+    if (el.hidden) return true;
+    const s = el.getAttribute && el.getAttribute('style');
+    if (s && /display\s*:\s*none|visibility\s*:\s*hidden/i.test(s)) return true;
+    return false;
+  }
+
+  function walkText(root, out, budget) {
+    for (let n = root.firstChild; n; n = n.nextSibling) {
+      if (budget.n++ > NODE_BUDGET) return;
+      if (n.nodeType === 3) {
+        const v = n.nodeValue;
+        if (v && v.trim()) out.push(v);
+      } else if (n.nodeType === 1) {
+        if (SKIP_TAGS[n.tagName]) continue;
+        if (isHidden(n)) continue;
+        if (n.shadowRoot) walkText(n.shadowRoot, out, budget);
+        walkText(n, out, budget);
+      }
+    }
+  }
+
+  function shadowText(root) {
+    const out = [];
+    const budget = { n: 0 };
+    let hosts;
+    try { hosts = root.querySelectorAll('*'); } catch (e) { return ''; }
+    const limit = Math.min(hosts.length, 20000);
+    for (let i = 0; i < limit; i++) {
+      const el = hosts[i];
+      if (!el.shadowRoot) continue;
+      if (isHidden(el)) continue;
+      if (el.checkVisibility && el.checkVisibility() === false) continue;
+      walkText(el.shadowRoot, out, budget);
+    }
+    return out.join(' ');
+  }
+
+  /* What the keywords are matched against: a column's cells when the monitored
+   * area is a column, otherwise the scoped element's text (or its markup). */
+  function harvest() {
+    if (cfg.selectorType === 'column' && (cfg.selector || '').trim()) {
+      const cells = columnCells(cfg.selector.trim());
+      return { hay: cells.map(c => c.text || '·').join(' | '), cells };
+    }
+    const root = scopeRoot();
+    if (!root) return { hay: '', cells: null };
+    return { hay: cfg.searchSource ? stripCode(root.innerHTML || '') : textOf(root), cells: null };
+  }
+
   function textOf(root) {
-    return (root.innerText || root.textContent || '').replace(/\s+/g, ' ').trim();
+    let t = '';
+    try { t = root.innerText || ''; } catch (e) {}
+    if (cfg && cfg.deepScan !== false) {
+      const extra = shadowText(root);
+      if (extra) t += ' ' + extra;
+    }
+    if (!t.trim()) {                       // innerText empty (detached / unrendered)
+      const out = [];
+      walkText(root, out, { n: 0 });
+      t = out.join(' ');
+    }
+    return t.replace(/\s+/g, ' ').trim();
   }
 
   function testKeyword(k, root, hay) {
@@ -177,10 +421,9 @@
   }
 
   function evaluate() {
-    const root = scopeRoot();
-    if (!root) return { found: false, sig: '0', excerpt: '' };
-
-    const hay = cfg.searchSource ? (root.innerHTML || '') : textOf(root);
+    _roots = null;                                   // fresh shadow-root scan
+    const { hay, cells } = harvest();
+    const root = cells ? (document.body || document.documentElement) : scopeRoot();
     const sig = hash(hay);
 
     if (cfg.mode === 'change') return { found: true, sig, excerpt: snippet(hay, 0, 200) };
@@ -190,7 +433,7 @@
 
     const hits = [];
     for (const k of list) {
-      const r = testKeyword(k, root, hay);
+      const r = cells ? testInCells(k, cells) : testKeyword(k, root, hay);
       if (r.found) hits.push(r);
       else if (cfg.matchLogic === 'all') return { found: false, sig, excerpt: '' };
     }
@@ -202,6 +445,72 @@
       el: first.el || null, needle: first.needle, rx: first.rx,
       count: hits.length, total: list.length
     };
+  }
+
+  /* Even in "search HTML source" mode, inline scripts and styles are noise. */
+  function stripCode(html) {
+    return html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
+  }
+
+  /* What Ctrl+F would find right now: a count per keyword, so you can see
+   * whether a term matches — and how often — before starting a watch. */
+  function findReport(useCfg) {
+    const prev = cfg;
+    if (useCfg) cfg = Object.assign({}, useCfg);
+    try {
+      if (!cfg) return { error: 'no settings' };
+      _roots = null;
+      const { hay, cells } = harvest();
+      const list = (cfg.keywords || []).filter(k => k.enabled !== false && (k.value || '').trim());
+      const out = [];
+
+      for (const k of list) {
+        const v = (k.value || '').trim();
+        const type = (!k.type || k.type === 'auto') ? detectType(k.value) : k.type;
+        let n = 0;
+
+        if (cells) {
+          if (EMPTY_TOKEN.test(v)) n = cells.filter(c => !c.text).length;
+          else if (type === 'regex') {
+            const rx = toRegex(v, cfg.caseSensitive);
+            n = rx ? cells.filter(c => rx.test(c.text)).length : 0;
+          } else {
+            const N = cfg.caseSensitive ? v : v.toLowerCase();
+            n = cells.filter(c => (cfg.caseSensitive ? c.text : c.text.toLowerCase()).indexOf(N) >= 0).length;
+          }
+        } else if (type === 'css' || type === 'xpath') {
+          n = type === 'xpath' ? (resolveEl(v, 'xpath') ? 1 : 0) : deepQueryAll(v).length;
+        } else if (type === 'regex') {
+          const rx = toRegex(v, cfg.caseSensitive);
+          if (rx) {
+            const g = new RegExp(rx.source, rx.flags.indexOf('g') >= 0 ? rx.flags : rx.flags + 'g');
+            n = (hay.match(g) || []).length;
+          }
+        } else {
+          const H = cfg.caseSensitive ? hay : hay.toLowerCase();
+          const N = cfg.caseSensitive ? v : v.toLowerCase();
+          let i = H.indexOf(N);
+          while (i >= 0 && n < 9999) { n++; i = H.indexOf(N, i + N.length); }
+        }
+        out.push({ value: v, type, count: n });
+      }
+
+      const scan = evaluate();
+      return {
+        keywords: out,
+        excerpt: scan.excerpt || '',
+        chars: hay.length,
+        cells: cells ? cells.length : 0,
+        scope: cells ? 'column “' + (cfg.selector || '') + '”'
+          : ((cfg.selector || '').trim() ? 'selected region' : 'whole page')
+      };
+    } catch (e) {
+      return { error: String(e) };
+    } finally {
+      cfg = prev;
+    }
   }
 
   function snippet(hay, index, len) {
@@ -226,7 +535,8 @@
 
     if (cfg.highlight && target) withoutObserver(() => paintHighlight(target));
     if (cfg.scrollToMatch && target) { try { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {} }
-    if (cfg.flashPage) withoutObserver(() => showBanner(scan.excerpt));
+    /* The banner is drawn on request from the worker, which also uses it as the
+     * fallback when the OS refuses to show a notification. */
     if (cfg.scriptOnMatch) runUserScript(cfg.scriptOnMatch, { event: 'match', excerpt: scan.excerpt, url: location.href });
 
     if (cfg.autoClick) {
@@ -338,30 +648,53 @@
 
   /* -------------------------------------------------------- live observer */
 
+  /* Single-page apps mutate constantly, so the live check is both debounced
+   * and rate-limited — otherwise a busy app re-scans dozens of times a second. */
+  let lastLive = 0;
+
   function startObserver() {
     const target = document.body || document.documentElement;
     if (!target) return;
+    const wait = Math.max(200, Number(cfg.liveDebounce) || 800);
+    const maxGap = Math.max(2000, wait * 2);
     observer = new MutationObserver(() => {
       if (suppressMO) return;
+      const now = Date.now();
+      /* A plain debounce starves on an app that mutates non-stop — the timer is
+       * reset before it can ever fire. Force a scan once maxGap has elapsed. */
+      if (now - lastLive >= maxGap) {
+        clearTimeout(moTimer);
+        lastLive = now;
+        liveCheck();
+        return;
+      }
       clearTimeout(moTimer);
-      moTimer = setTimeout(() => { if (running) liveCheck(); }, 400);
+      moTimer = setTimeout(() => {
+        if (!running) return;
+        lastLive = Date.now();
+        liveCheck();
+      }, wait);
     });
     observer.observe(target, { childList: true, subtree: true, characterData: true, attributes: false });
   }
 
+  let liveBusy = false;
+
   async function liveCheck() {
-    if (cfg.mode === 'change') return;
-    const scan = evaluate();
+    if (!cfg || cfg.mode === 'change' || liveBusy) return;
+    liveBusy = true;
+    let scan;
+    try { scan = evaluate(); } finally { liveBusy = false; }
     const wants = cfg.mode === 'lost' ? !scan.found : scan.found;
     if (!wants) return;
     try {
       const res = await chrome.runtime.sendMessage({
-        type: 'REPORT', found: scan.found, sig: scan.sig,
+        type: 'REPORT', found: scan.found, sig: scan.sig, frame: !IS_TOP, live: true,
         excerpt: scan.excerpt, title: document.title, url: location.href
       });
       if (res && res.matched) onMatch(scan);
       if (res && res.stop) teardown();
-      else if (res) deadline = res.deadline || deadline;
+      else if (res && IS_TOP) deadline = res.deadline || deadline;
     } catch (e) { teardown(); }
   }
 
@@ -488,24 +821,33 @@
     if (ui && ui.label) ui.label.textContent = text || '';
   }
 
-  function showBanner(excerpt) {
+  let lastBanner = null;
+
+  function showBanner(excerpt, warn) {
+    if (lastBanner && lastBanner.parentNode) lastBanner.remove();
+    const base = warn ? '#b45309' : '#059669';
+    const lift = warn ? '#d97706' : '#10b981';
     const host = document.createElement('div');
     host.setAttribute('data-refresh-radar-ui', '1');
     host.style.cssText = 'all:initial;position:fixed;top:0;left:0;right:0;z-index:2147483647';
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML =
       '<style>' +
-      '.b{font:600 13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:#059669;color:#fff;' +
+      '.b{font:600 13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:' + base + ';color:#fff;' +
       'padding:11px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 16px #0006;animation:p 1s ease-in-out 3}' +
-      '@keyframes p{0%,100%{background:#059669}50%{background:#10b981}}' +
+      '@keyframes p{0%,100%{background:' + base + '}50%{background:' + lift + '}}' +
       '.t{flex:1;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       'button{font:600 12px sans-serif;background:#ffffff2e;border:0;color:#fff;border-radius:6px;padding:4px 9px;cursor:pointer}' +
       '</style>' +
-      '<div class="b"><b>Refresh Radar — match</b><span class="t"></span><button>Dismiss</button></div>';
+      '<div class="b"><b></b><span class="t"></span><button>Dismiss</button></div>';
+    root.querySelector('b').textContent = warn
+      ? 'Refresh Radar — match (your OS blocked the notification)'
+      : 'Refresh Radar — match';
     root.querySelector('.t').textContent = (excerpt || '').slice(0, 220);
     root.querySelector('button').addEventListener('click', () => host.remove());
     (document.body || document.documentElement).appendChild(host);
-    setTimeout(() => { if (host.parentNode) host.remove(); }, 15000);
+    lastBanner = host;
+    setTimeout(() => { if (host.parentNode) host.remove(); }, warn ? 30000 : 15000);
   }
 
   /* ------------------------------------------------------- element picker */

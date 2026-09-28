@@ -12,6 +12,7 @@
 
 let deadlines = new Map();          // tabId -> timestamp
 let lastTick = 0;
+let lastBeat = 0;
 
 setInterval(loop, 250);
 
@@ -23,11 +24,18 @@ function loop() {
   }
   if (due.length) chrome.runtime.sendMessage({ type: 'OC_FIRE', tabIds: due }).catch(() => {});
 
-  if (now - lastTick >= 1000 && deadlines.size) {
+  if (now - lastTick >= 1000) {
     lastTick = now;
-    const items = [];
-    for (const [tabId, at] of deadlines) items.push({ tabId, remaining: Math.max(0, at - now) });
-    chrome.runtime.sendMessage({ type: 'OC_TICK', items }).catch(() => {});
+    if (deadlines.size) {
+      const items = [];
+      for (const [tabId, at] of deadlines) items.push({ tabId, remaining: Math.max(0, at - now) });
+      chrome.runtime.sendMessage({ type: 'OC_TICK', items }).catch(() => {});
+    } else if (now - lastBeat >= 5000) {
+      /* Heartbeat even with nothing scheduled, so the worker can tell the
+       * difference between "idle" and "this document was reclaimed". */
+      lastBeat = now;
+      chrome.runtime.sendMessage({ type: 'OC_PING' }).catch(() => {});
+    }
   }
 }
 

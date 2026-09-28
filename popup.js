@@ -1,20 +1,21 @@
 /* Refresh Radar — popup controller */
 
 const BOOL = [
+  'refreshEnabled',
   'hardReload', 'noResubmit', 'onlyWhenHidden', 'pauseOnInteract', 'retryOnError',
   'captchaPause', 'keepAwake', 'stopIfUrlChanges', 'preserveScroll', 'preserveForms',
   'visualTimer', 'continuousTimer',
-  'monitorEnabled', 'caseSensitive', 'searchSource', 'liveWatch',
+  'monitorEnabled', 'caseSensitive', 'searchSource', 'liveWatch', 'scanFrames', 'deepScan',
   'highlight', 'scrollToMatch', 'autoClick', 'autoClickNewTab', 'flashPage',
   'notify', 'sticky', 'sound', 'focusTab', 'alertOnce', 'copyToClipboard'
 ];
 const NUM = [
   'intervalMin', 'intervalMax', 'resumeAfter', 'errorRetryDelay', 'startDelay',
-  'postLoadDelay', 'autoClickDelay', 'soundRepeat', 'volume'
+  'postLoadDelay', 'autoClickDelay', 'soundRepeat', 'volume', 'alertCooldown', 'rescanEvery'
 ];
 const TEXT = [
   'timerStyle', 'timerCorner', 'startAt', 'stopAt', 'selector', 'selectorType',
-  'autoClickTarget', 'scriptOnLoad', 'scriptOnMatch', 'soundTone', 'webhook'
+  'autoClickTarget', 'scriptOnLoad', 'scriptOnMatch', 'soundTone', 'webhook', 'alertMode'
 ];
 
 let tab = null;
@@ -72,6 +73,28 @@ async function init() {
     refresh();
   });
   $('openOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
+  $('recommend').addEventListener('click', () => {
+    const rec = {
+      refreshEnabled: true, intervalMode: 'fixed', interval: 0.5, rescanEvery: 500,
+      liveWatch: true, scanFrames: true, deepScan: true,
+      monitorEnabled: true, notify: true, sound: true, sticky: true, flashPage: true,
+      stopOnMatch: false, alertMode: 'edge', alertCooldown: 30,
+      onlyWhenHidden: false, pauseOnInteract: false, retryOnError: true, captchaPause: true,
+      maxRefreshes: 0, startDelay: 0, startAt: '', stopAt: ''
+    };
+    intervalMode = 'fixed';
+    setSeg('modeSeg', 'fixed');
+    Object.keys(rec).forEach(k => {
+      const el = $(k);
+      if (!el) return;
+      if (el.type === 'checkbox') el.checked = !!rec[k]; else el.value = rec[k];
+    });
+    $('is').value = 0.5;
+    $('maxOn').checked = false;
+    $('continueRefresh').checked = true;     // stopOnMatch false
+    onChange();
+    toast('Recommended settings applied');
+  });
 
   $('kwAdd').addEventListener('click', addKeyword);
   $('kwInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addKeyword(); } });
@@ -82,6 +105,14 @@ async function init() {
     renderKeywords(); onChange(); toast('Defaults added');
   });
   $('kwClear').addEventListener('click', () => { keywords = []; renderKeywords(); onChange(); });
+  $('kwTest').addEventListener('click', findNow);
+  $('alertMode').addEventListener('change', () => {
+    // "every reload" is pointless behind a 60-second cooldown
+    if ($('alertMode').value !== 'edge' && Number($('alertCooldown').value) >= 60) {
+      $('alertCooldown').value = 0;
+    }
+    onChange();
+  });
   $('kwExport').addEventListener('click', exportKeywords);
   $('kwImport').addEventListener('click', () => $('kwFile').click());
   $('kwFile').addEventListener('change', importKeywords);
@@ -136,10 +167,18 @@ function setSeg(id, v) {
   $(id).querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
 }
 
-const step = () => { const v = Number($('is').value) || 0; return v >= 300 ? 60 : v >= 60 ? 15 : v >= 20 ? 5 : 1; };
+const step = () => {
+  const v = Number($('is').value) || 0;
+  if (v >= 300) return 60;
+  if (v >= 60) return 15;
+  if (v >= 20) return 5;
+  if (v >= 3) return 1;
+  return 0.5;
+};
 
 function bumpInterval(d) {
-  $('is').value = Math.max(1, (Number($('is').value) || 0) + d);
+  const v = Math.max(0.2, Math.round(((Number($('is').value) || 0) + d) * 10) / 10);
+  $('is').value = v;
   onChange();
 }
 
@@ -154,11 +193,11 @@ function write(cfg) {
   $('maxOn').checked = Number(cfg.maxRefreshes) > 0;
   $('maxRefreshes').value = Number(cfg.maxRefreshes) > 0 ? cfg.maxRefreshes : 10;
 
-  const secs = Math.max(1, Number(cfg.interval) || 30);
+  const secs = Math.max(0.2, Number(cfg.interval) || 0.5);
   $('is').value = secs;
   $('ih').value = Math.floor(secs / 3600);
   $('im').value = Math.floor((secs % 3600) / 60);
-  $('ics').value = secs % 60;
+  $('ics').value = Math.round(secs % 60);
 
   intervalMode = cfg.intervalMode || 'fixed';
   watchMode = cfg.mode || 'found';
@@ -187,18 +226,21 @@ function read() {
   out.keywords = keywords.slice();
 
   out.interval = intervalMode === 'custom'
-    ? Math.max(1, (Number($('ih').value) || 0) * 3600 + (Number($('im').value) || 0) * 60 + (Number($('ics').value) || 0))
-    : Math.max(1, Number($('is').value) || 30);
+    ? Math.max(0.2, (Number($('ih').value) || 0) * 3600 + (Number($('im').value) || 0) * 60 + (Number($('ics').value) || 0))
+    : Math.max(0.2, Number($('is').value) || 0.5);
   return out;
 }
 
 function syncUI() {
-  $('fixedWrap').classList.toggle('hidden', intervalMode !== 'fixed');
-  $('randomWrap').classList.toggle('hidden', intervalMode !== 'random');
-  $('customWrap').classList.toggle('hidden', intervalMode !== 'custom');
 
   $('presets').querySelectorAll('button').forEach(b =>
     b.classList.toggle('on', Number(b.dataset.s) === Number($('is').value)));
+
+  const reloading = $('refreshEnabled').checked;
+  $('fixedWrap').classList.toggle('hidden', intervalMode !== 'fixed' || !reloading);
+  $('randomWrap').classList.toggle('hidden', intervalMode !== 'random' || !reloading);
+  $('customWrap').classList.toggle('hidden', intervalMode !== 'custom' || !reloading);
+  $('modeSeg').classList.toggle('hidden', !reloading);
 
   $('maxExtra').classList.toggle('hidden', !$('maxOn').checked);
   $('resumeExtra').classList.toggle('hidden', !$('pauseOnInteract').checked);
@@ -207,6 +249,14 @@ function syncUI() {
   $('soundExtra').classList.toggle('hidden', !$('sound').checked);
   $('timerStyleWrap').classList.toggle('hidden', !$('visualTimer').checked);
   $('kwWrap').classList.toggle('hidden', watchMode === 'change');
+
+  const isColumn = $('selectorType').value === 'column';
+  $('colNote').classList.toggle('hidden', !isColumn);
+  $('pick').classList.toggle('hidden', isColumn);
+  $('selector').placeholder = isColumn ? 'Assigned to' : '#price, .status, //div[@id=\'x\']';
+  $('selLabel').innerHTML = isColumn
+    ? 'Column heading'
+    : 'Limit the search to one region <em class="hint">blank = whole page</em>';
 }
 
 function onChange() {
@@ -273,6 +323,31 @@ function addKeyword() {
   $('kwInput').value = '';
   renderKeywords();
   onChange();
+}
+
+/* Run the search against the live page and show what it found, the way
+ * pressing Ctrl+F yourself would. */
+async function findNow() {
+  const box = $('findResult');
+  box.classList.remove('hidden');
+  box.textContent = 'Searching…';
+
+  const r = await send({ type: 'FIND_NOW', tabId: tab.id, cfg: read() });
+  if (!r || !r.ok) { box.textContent = (r && r.error) || 'Could not search this page.'; return; }
+  if (!r.keywords.length) { box.textContent = 'Add a keyword first.'; return; }
+
+  const rows = r.keywords.map(k =>
+    '<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0">' +
+    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(k.value) + '</span>' +
+    '<b style="color:' + (k.count ? 'var(--accent-2)' : 'var(--dim)') + '">' +
+    (k.count ? k.count + '×' : 'not found') + '</b></div>').join('');
+
+  const where = 'Searched the ' + esc(r.scope) +
+    (r.frames > 1 ? ' across ' + r.frames + ' frames' : '') + '.';
+
+  box.innerHTML = rows +
+    '<div style="margin-top:6px;color:var(--dim)">' + where + '</div>' +
+    (r.excerpt ? '<div style="margin-top:6px;color:var(--muted)">“' + esc(r.excerpt.slice(0, 160)) + '”</div>' : '');
 }
 
 function exportKeywords() {
@@ -388,9 +463,16 @@ function renderStats() {
   if (!s) { box.textContent = 'Not watching this tab yet.'; return; }
   const st = s.stats;
   const last = st.lastMatchAt ? new Date(st.lastMatchAt).toLocaleTimeString() : '—';
+  const scanAgo = s.lastScanAt ? Math.round((Date.now() - s.lastScanAt) / 1000) + 's ago' : '—';
+  const health = s.recovered
+    ? '<span style="color:var(--warn)">recovered ' + s.recovered + '×</span>'
+    : '<span style="color:var(--accent-2)">healthy</span>';
+
   box.innerHTML =
     'Reloads <b>' + st.refreshes + '</b> · Matches <b>' + st.matches + '</b> · Errors <b>' + (st.errors || 0) + '</b><br>' +
-    'Started <b>' + new Date(st.startedAt).toLocaleTimeString() + '</b> · Last hit <b>' + last + '</b>' +
+    'Last scan <b>' + scanAgo + '</b> · Last hit <b>' + last + '</b> · ' + health +
+    (s.notifyFailed ? '<br><span style="color:var(--warn)">' + s.notifyFailed +
+      ' notification(s) blocked by your OS — the in-page banner was used</span>' : '') +
     (s.note ? '<br><b>' + esc(s.note) + '</b>' : '') +
     (st.lastExcerpt ? '<br>“' + esc(st.lastExcerpt.slice(0, 110)) + '”' : '');
 }
@@ -412,28 +494,38 @@ async function renderTabs() {
     row.className = 'trow';
 
     const dot = document.createElement('span');
-    dot.className = 'dot' + (s.paused ? ' paused' : '');
+    dot.className = 'dot' + (s.paused || s.waiting ? ' paused' : '');
 
     const meta = document.createElement('div');
     meta.className = 'meta';
     const b = document.createElement('b');
     b.textContent = s.title || host;
     const sub = document.createElement('span');
-    sub.textContent = host + ' · ' + s.stats.refreshes + ' reloads' +
-      (s.keywords && s.keywords.length ? ' · ' + s.keywords.slice(0, 2).join(', ') : '');
+    sub.textContent = s.waiting
+      ? host + ' · waiting for the page to reopen'
+      : host + ' · ' + s.stats.refreshes + ' reloads' +
+        (s.recovered ? ' · recovered ' + s.recovered + '×' : '') +
+        (s.keywords && s.keywords.length ? ' · ' + s.keywords.slice(0, 2).join(', ') : '');
     meta.append(b, sub);
-    meta.style.cursor = 'pointer';
-    meta.addEventListener('click', () => chrome.tabs.update(s.tabId, { active: true }));
+    if (!s.waiting) {
+      meta.style.cursor = 'pointer';
+      meta.addEventListener('click', () => chrome.tabs.update(s.tabId, { active: true }));
+    }
 
     const cd = document.createElement('span');
     cd.className = 'cd';
-    cd.textContent = s.paused ? '||' : (s.remaining ? Math.ceil(s.remaining / 1000) + 's' : '–');
+    cd.textContent = s.waiting ? '⏳' : (s.paused ? '||'
+      : (s.remaining ? (s.remaining < 1000 ? '<1s' : Math.ceil(s.remaining / 1000) + 's') : '–'));
 
     const rm = document.createElement('button');
     rm.className = 'rm';
     rm.textContent = '×';
-    rm.title = 'Stop this tab';
-    rm.addEventListener('click', async () => { await send({ type: 'STOP', tabId: s.tabId }); refresh(); });
+    rm.title = s.waiting ? 'Forget this parked watch' : 'Stop this tab';
+    rm.addEventListener('click', async () => {
+      if (s.waiting) await send({ type: 'CLEAR_PENDING' });
+      else await send({ type: 'STOP', tabId: s.tabId });
+      refresh();
+    });
 
     row.append(dot, meta, cd, rm);
     box.appendChild(row);
