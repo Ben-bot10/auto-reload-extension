@@ -1,6 +1,6 @@
 # Refresh Radar — Auto Reload & Page Monitor
 
-**v4.0** — a Chrome/Edge/Brave extension (Manifest V3) that auto-refreshes pages, watches
+**v4.1** — a Chrome/Edge/Brave extension (Manifest V3) that auto-refreshes pages, watches
 them for keywords, elements or changes, acts on the page when it finds something, and
 alerts you — and **keeps running while the tab is hidden and the window is minimized**.
 Everything is unlocked: no tiers, no account, no server.
@@ -33,6 +33,25 @@ Refresh Radar never puts the clock in the page:
 
 Verified in headless Chromium: with the watched tab behind another tab and the window
 reporting `minimized`, a 2-second watch logged 4 reloads in 11 seconds.
+
+## Blank page while refreshing (fixed in 4.1)
+
+`chrome.tabs.reload()` on a page that is still loading **restarts** the load. With a
+half-second interval, any page needing longer than that never finished — the tab stayed
+blank, the content script never ran, nothing was scanned, and no notification or sound
+could fire. 4.0 shipped 0.5s as the default, which turned that from an edge case into the
+normal one.
+
+A reload is now never issued mid-load. **The interval is the gap between finished loads**,
+not between reload calls: a fast page keeps the full half-second cadence, a slow one
+settles into load-then-wait. A load that never completes is abandoned after 30 seconds and
+the watch carries on.
+
+Worth knowing even with the fix: on a page that takes six seconds to load, a half-second
+gap means it is mid-load most of the time, so it will *look* mostly blank even though
+every cycle now completes and every match is caught. The popup tells you the measured load
+time and says so. For an app like that, turn **Reload the page** off and let the 500ms scan
+loop watch it instead — the app refreshes its own content anyway.
 
 ## Why it used to be hit and miss (4.0)
 

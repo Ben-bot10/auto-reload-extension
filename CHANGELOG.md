@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.1.0
+
+Fixes the blank page and total silence that 4.0's half-second default caused.
+
+- **A reload is never issued while the page is still loading.**
+  `chrome.tabs.reload()` on an in-flight load restarts it, so any page that
+  takes longer than the interval never finished: the tab sat blank forever, the
+  content script never ran, nothing was ever scanned, and no notification or
+  sound could fire. Shipping 0.5s as the default in 4.0 made that the normal
+  case rather than an edge case.
+- **The interval now means the gap between *finished* loads**, not between
+  reload calls. A fast page keeps the full half-second cadence; a slow one
+  settles into load-then-wait, which is what makes a short interval safe.
+- **A load that never completes is abandoned** after `maxLoadWait` (30s by
+  default) and the watch carries on, including when the page started that
+  navigation itself rather than the extension.
+- **The "Reload the page" toggle actually works.** The popup overwrote it with
+  `true` on every read, so turning it off did nothing.
+- The popup shows how long the page takes to load, and says plainly when a
+  short interval means the page will be mid-load most of the time — with the
+  suggestion to turn reloading off and let the scan loop watch instead.
+
+Regression test: a page whose render-blocking script takes 6s. On 4.0 the body
+stays empty, loads=1, reloads=0 — wedged. On 4.1 it loads fully every cycle
+(6.0s each), detects 4 times in 22s, and reloads on the intended cadence.
+
 ## 4.0.0
 
 Reliability release. "Hit or miss" had four separate causes, all now fixed.

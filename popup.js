@@ -217,7 +217,6 @@ function read() {
   NUM.forEach(id => { const el = $(id); if (el) out[id] = Number(el.value) || 0; });
   TEXT.forEach(id => { const el = $(id); if (el) out[id] = el.value; });
 
-  out.refreshEnabled = true;
   out.stopOnMatch = !$('continueRefresh').checked;
   out.maxRefreshes = $('maxOn').checked ? Math.max(1, Number($('maxRefreshes').value) || 1) : 0;
   out.intervalMode = intervalMode;
@@ -464,6 +463,19 @@ function renderStats() {
   const st = s.stats;
   const last = st.lastMatchAt ? new Date(st.lastMatchAt).toLocaleTimeString() : '—';
   const scanAgo = s.lastScanAt ? Math.round((Date.now() - s.lastScanAt) / 1000) + 's ago' : '—';
+  let loadMs = '';
+  if (st.lastLoadMs) {
+    const secs = (st.lastLoadMs / 1000).toFixed(1);
+    loadMs = '<br>This page takes <b>' + secs + 's</b> to load — the interval is counted ' +
+             'from when it finishes, never before.';
+    /* A short gap on a slow page is legal but means the page is in a loading
+     * state most of the time. Say so rather than let it look broken. */
+    if (st.lastLoadMs > 3000 && s.cfg && s.cfg.refreshEnabled) {
+      loadMs += '<br><span style="color:var(--warn)">It will be mid-load most of the time. ' +
+                'For an app like this, turn off <b>Reload the page</b> and let the scan loop ' +
+                'watch it instead.</span>';
+    }
+  }
   const health = s.recovered
     ? '<span style="color:var(--warn)">recovered ' + s.recovered + '×</span>'
     : '<span style="color:var(--accent-2)">healthy</span>';
@@ -473,6 +485,7 @@ function renderStats() {
     'Last scan <b>' + scanAgo + '</b> · Last hit <b>' + last + '</b> · ' + health +
     (s.notifyFailed ? '<br><span style="color:var(--warn)">' + s.notifyFailed +
       ' notification(s) blocked by your OS — the in-page banner was used</span>' : '') +
+    loadMs +
     (s.note ? '<br><b>' + esc(s.note) + '</b>' : '') +
     (st.lastExcerpt ? '<br>“' + esc(st.lastExcerpt.slice(0, 110)) + '”' : '');
 }
@@ -540,8 +553,14 @@ async function tick() {
   const st = await send({ type: 'GET_STATE', tabId: tab.id });
   const s = st && st.session;
   if (!s || !s.active) { el.textContent = 'Idle'; running = false; return; }
+  if (s.waitingForLoad || s.loadingSince) {
+    const secs = s.loadingSince ? Math.round((Date.now() - s.loadingSince) / 1000) : 0;
+    el.textContent = 'Page still loading' + (secs > 1 ? ' (' + secs + 's)' : '') + '…';
+    return;
+  }
   const left = s.nextAt ? s.nextAt - Date.now() : 0;
-  el.textContent = left > 0 ? 'Next reload in ' + Math.ceil(left / 1000) + 's'
+  el.textContent = left > 0
+    ? 'Next reload in ' + (left < 1000 ? '<1' : Math.ceil(left / 1000)) + 's'
     : (s.nextAt ? 'Reloading…' : 'Watching for changes');
   if (document.querySelector('.tab[data-tab="tabs"]').classList.contains('active')) renderTabs();
 }

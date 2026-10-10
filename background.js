@@ -49,6 +49,7 @@ const DEFAULTS = {
   liveWatch: true,
   liveDebounce: 800,           // ms to settle after DOM mutations
   rescanEvery: 500,            // ms — keep scanning between reloads (0 = off)
+  maxLoadWait: 30,             // s — force a reload if a load never completes
   postLoadDelay: 0,
   scanFrames: true,            // also look inside iframes (SPAs render there)
   deepScan: true,              // walk open shadow roots (web-component apps)
@@ -445,6 +446,30 @@ async function doReload(tabId) {
     return;
   }
 
+  /* Never reload a page that is still loading.
+   *
+   * chrome.tabs.reload() on an in-flight load restarts it. At a short interval
+   * that means a page needing longer than the interval NEVER finishes: the tab
+   * sits blank forever, the content script never runs, nothing is ever scanned
+   * and no alert can fire. The interval is therefore the gap *between finished
+   * loads*, not between reload calls — which is what makes a half-second
+   * setting safe on a heavy page instead of fatal. */
+  /* The load may have been started by the page itself rather than by us, in
+   * which case there is no stopwatch running yet. Start one on first sight,
+   * otherwise a page that hangs on its own navigation postpones forever. */
+  if (tab.status === 'loading' && !sess.loadingSince) sess.loadingSince = Date.now();
+
+  const waited = sess.loadingSince ? Date.now() - sess.loadingSince : 0;
+  const ceiling = Math.max(5000, (Number(sess.cfg.maxLoadWait) || 30) * 1000);
+  if ((tab.status === 'loading' || sess.loadingSince) && waited < ceiling) {
+    sess.waitingForLoad = true;
+    sess.nextAt = Date.now() + 400;                 // look again shortly
+    await save();
+    await armClock();
+    return;
+  }
+  sess.waitingForLoad = false;
+
   try {
     if (sess.cfg.noResubmit || tab.discarded) {
       // A fresh navigation: no "confirm form resubmission", and it revives a
@@ -455,11 +480,12 @@ async function doReload(tabId) {
     }
   } catch (e) {}
 
-  /* Provisional next deadline, refined by the page's REPORT when it lands. It
-   * has to allow a little slack for the load itself, but never so much that it
-   * overrides a deliberately short interval. */
-  const base = baseDelayMs(sess.cfg, false);
-  sess.nextAt = Date.now() + Math.max(base, Math.min(3000, base * 4));
+  /* The countdown does not start here — it starts when the load finishes
+   * (tabs.onUpdated below, or the page's own REPORT). Until then we only poll
+   * to see whether it is done. */
+  sess.loadingSince = Date.now();
+  sess.stats.loadStartedAt = sess.loadingSince;
+  sess.nextAt = Date.now() + 400;
   await save();
   await armClock();
 }
@@ -670,6 +696,11 @@ async function handle(msg, sender) {
       sess.url = msg.url;
       sess.stats.loads++;
       if (sess.stats.loads > 1) sess.stats.refreshes++;
+      if (sess.loadingSince) {
+        sess.stats.lastLoadMs = Date.now() - sess.loadingSince;
+        sess.loadingSince = 0;
+      }
+      sess.waitingForLoad = false;
       updatePower();
       await save();
 
@@ -1161,12 +1192,27 @@ chrome.tabs.onRemoved.addListener(async (tabId, info) => {
   await armClock();
 });
 
-/* Any page finishing a load is a chance to re-attach a parked watch. */
+/* A finished load starts the countdown for the next one, and is also the
+ * moment a parked watch can re-attach itself. */
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (info.status !== 'complete') return;
   await load();
-  if (!state.pending || !state.pending.length) return;
-  await adopt(tab);
+
+  const sess = state.sessions[tabId];
+  if (sess && sess.active && !sess.paused) {
+    if (sess.loadingSince) {
+      sess.stats.lastLoadMs = Date.now() - sess.loadingSince;
+      sess.loadingSince = 0;
+    }
+    sess.waitingForLoad = false;
+    const d = reloadBudget(sess, false);
+    sess.nextAt = d === null ? 0 : Date.now() + d;
+    await save();
+    await armClock();
+    return;
+  }
+
+  if (state.pending && state.pending.length) await adopt(tab);
 });
 
 chrome.webNavigation.onErrorOccurred.addListener(async (d) => {
